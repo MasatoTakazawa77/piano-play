@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>楽譜プレイヤー</title>
+  <style>
+    :root {
+      --bg:         #0E0E18;
+      --surface:    #181826;
+      --surface-2:  #222236;
+      --border:     #2E2E4A;
+      --text:       #EEEEFF;
+      --text-muted: #8888AA;
+      --accent:     #7C6AFC;
+      --accent-dim: rgba(124,106,252,0.18);
+      --accent-glow:rgba(124,106,252,0.35);
+      --safe-top:   env(safe-area-inset-top, 0px);
+      --safe-bot:   env(safe-area-inset-bottom, 0px);
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Helvetica Neue', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', sans-serif;
+      font-size: 15px;
+      line-height: 1.5;
+      overflow: hidden;
+    }
+    button { cursor: pointer; font: inherit; border: none; background: none; color: inherit; }
+    input[type="range"] { cursor: pointer; accent-color: var(--accent); }
+    select { font: inherit; cursor: pointer; }
+
+    .screen {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      padding-top: var(--safe-top);
+      padding-bottom: var(--safe-bot);
+      overflow: hidden;
+    }
+    .screen[hidden] { display: none; }
+
+    /* Error banner */
+    #error-banner {
+      position: fixed;
+      top: calc(var(--safe-top) + 8px);
+      left: 12px; right: 12px;
+      background: #3A1010;
+      border: 1px solid #E85454;
+      border-radius: 10px;
+      padding: 10px 14px;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      z-index: 100;
+      font-size: 13px;
+      color: #FFB0B0;
+    }
+    #error-banner[hidden] { display: none; }
+    #error-msg { flex: 1; line-height: 1.5; }
+    #btn-error-close { font-size: 18px; color: #FF8888; flex-shrink: 0; margin-top: -1px; }
+
+    /* HOME */
+    #screen-home { background: #000; }
+    #camera-video { flex: 1; width: 100%; object-fit: cover; background: #000; }
+    #camera-canvas { display: none; }
+
+    .camera-hint {
+      position: absolute;
+      top: calc(var(--safe-top) + 12px);
+      left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,0.55);
+      border-radius: 20px;
+      padding: 6px 14px;
+      font-size: 12px;
+      color: rgba(255,255,255,0.75);
+      white-space: nowrap;
+      pointer-events: none;
+    }
+
+    .capture-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-around;
+      padding: 16px 32px 20px;
+      background: rgba(0,0,0,0.7);
+      backdrop-filter: blur(8px);
+    }
+
+    .btn-capture {
+      width: 72px; height: 72px;
+      border-radius: 50%;
+      background: #fff;
+      border: 4px solid rgba(255,255,255,0.4);
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      transition: transform 0.12s;
+    }
+    .btn-capture::after {
+      content: '';
+      width: 54px; height: 54px;
+      border-radius: 50%;
+      background: #fff;
+    }
+    .btn-capture:active { transform: scale(0.93); }
+    .btn-capture:disabled { opacity: 0.3; }
+
+    .btn-round {
+      width: 52px; height: 52px;
+      border-radius: 50%;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px;
+      transition: background 0.12s;
+    }
+    .btn-round:active { background: var(--surface); }
+
+    /* PREVIEW */
+    #screen-preview { background: #000; }
+    #preview-img { flex: 1; width: 100%; object-fit: contain; background: #000; }
+    .preview-bar {
+      display: flex;
+      gap: 12px;
+      padding: 16px;
+      background: rgba(0,0,0,0.8);
+    }
+    .btn-secondary {
+      flex: 1; padding: 14px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      font-size: 15px; font-weight: 600;
+    }
+    .btn-secondary:active { background: var(--surface); }
+    .btn-primary {
+      flex: 2; padding: 14px;
+      border-radius: 12px;
+      background: var(--accent);
+      font-size: 15px; font-weight: 700;
+      color: #fff;
+    }
+    .btn-primary:active { opacity: 0.85; }
+
+    /* PROCESSING */
+    #screen-processing {
+      align-items: center;
+      justify-content: center;
+      gap: 24px;
+    }
+    .music-loader { display: flex; gap: 10px; font-size: 40px; }
+    .music-loader span { animation: bounce 0.8s ease-in-out infinite; }
+    .music-loader span:nth-child(2) { animation-delay: 0.15s; }
+    .music-loader span:nth-child(3) { animation-delay: 0.3s; }
+    .music-loader span:nth-child(4) { animation-delay: 0.45s; }
+    @keyframes bounce {
+      0%,100% { transform: translateY(0); opacity: 0.4; }
+      50%      { transform: translateY(-14px); opacity: 1; }
+    }
+    #processing-msg { color: var(--text-muted); font-size: 14px; }
+
+    /* PLAYER */
+    #screen-player { background: var(--bg); overflow-y: auto; }
+    .player-header { padding: 20px 20px 12px; border-bottom: 1px solid var(--border); }
+    #score-title { font-size: 20px; font-weight: 700; margin-bottom: 2px; }
+    #score-meta { font-size: 13px; color: var(--text-muted); }
+
+    .note-display-area {
+      display: flex; flex-direction: column; align-items: center;
+      padding: 20px 16px 12px; gap: 14px;
+    }
+    #note-display {
+      font-size: 60px; font-weight: 700;
+      color: var(--accent);
+      min-height: 68px; line-height: 1;
+      text-align: center;
+      transition: transform 0.08s;
+    }
+    #note-roll {
+      display: flex; gap: 6px;
+      overflow-x: auto; width: 100%;
+      padding: 6px 4px;
+      scrollbar-width: none;
+    }
+    #note-roll::-webkit-scrollbar { display: none; }
+    .note-chip {
+      flex-shrink: 0;
+      padding: 5px 10px;
+      border-radius: 20px;
+      font-size: 12px; font-weight: 600;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      transition: background 0.1s, color 0.1s, transform 0.1s;
+    }
+    .note-chip.played { background: var(--accent-dim); color: var(--accent); border-color: transparent; }
+    .note-chip.active { background: var(--accent); color: #fff; border-color: transparent; transform: scale(1.12); }
+
+    .play-controls {
+      display: flex; align-items: center; justify-content: center;
+      gap: 20px; padding: 16px 20px;
+    }
+    #btn-play-pause {
+      width: 72px; height: 72px; border-radius: 50%;
+      background: var(--accent); font-size: 26px;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 0 24px var(--accent-glow);
+      transition: transform 0.1s;
+    }
+    #btn-play-pause:active { transform: scale(0.93); }
+    .btn-ctrl {
+      width: 52px; height: 52px; border-radius: 50%;
+      background: var(--surface-2); border: 1px solid var(--border);
+      font-size: 20px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .btn-ctrl:active { background: var(--surface); }
+
+    .divider { height: 1px; background: var(--border); }
+    .controls-panel { padding: 14px 20px 20px; display: flex; flex-direction: column; gap: 14px; }
+    .control-row {
+      display: grid;
+      grid-template-columns: 52px 1fr 40px;
+      align-items: center; gap: 10px;
+    }
+    .control-label { font-size: 12px; color: var(--text-muted); font-weight: 600; }
+    .control-value { font-size: 12px; color: var(--text-muted); text-align: right; font-variant-numeric: tabular-nums; }
+    input[type="range"] { width: 100%; height: 4px; border-radius: 2px; }
+    .instrument-row { display: grid; grid-template-columns: 52px 1fr; align-items: center; gap: 10px; }
+    #instrument-select {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 8px 10px;
+      font-size: 14px;
+    }
+    .btn-text-small {
+      align-self: center;
+      padding: 12px 20px;
+      font-size: 13px;
+      color: var(--text-muted);
+      text-decoration: underline;
+      background: none;
+    }
+  </style>
+</head>
+<body>
+
+<div id="error-banner" hidden>
+  <span id="error-msg"></span>
+  <button id="btn-error-close" aria-label="閉じる">✕</button>
+</div>
+
+<!-- HOME -->
+<div id="screen-home" class="screen">
+  <div class="camera-hint">楽譜をカメラに向けて撮影</div>
+  <video id="camera-video" autoplay playsinline muted></video>
+  <canvas id="camera-canvas"></canvas>
+  <div class="capture-bar">
+    <button class="btn-round" id="btn-upload" aria-label="ファイルを選択">🖼️</button>
+    <button class="btn-capture" id="btn-capture" aria-label="撮影"></button>
+    <button class="btn-round" id="btn-demo" aria-label="デモを再生">♫</button>
+  </div>
+  <input id="file-input" type="file" accept="image/*" hidden>
+</div>
+
+<!-- PREVIEW -->
+<div id="screen-preview" class="screen" hidden>
+  <img id="preview-img" alt="撮影した楽譜">
+  <div class="preview-bar">
+    <button class="btn-secondary" id="btn-retake">撮り直す</button>
+    <button class="btn-primary"   id="btn-recognize">楽譜を認識</button>
+  </div>
+</div>
+
+<!-- PROCESSING -->
+<div id="screen-processing" class="screen" hidden>
+  <div class="music-loader">
+    <span>♩</span><span>♪</span><span>♫</span><span>♬</span>
+  </div>
+  <p id="processing-msg">楽譜を認識中…</p>
+</div>
+
+<!-- PLAYER -->
+<div id="screen-player" class="screen" hidden>
+  <div class="player-header">
+    <div id="score-title">—</div>
+    <div id="score-meta"></div>
+  </div>
+  <div class="note-display-area">
+    <div id="note-display"></div>
+    <div id="note-roll"></div>
+  </div>
+  <div class="play-controls">
+    <button class="btn-ctrl" id="btn-stop"      aria-label="停止">⏹</button>
+    <button id="btn-play-pause"                  aria-label="再生">▶</button>
+    <button class="btn-ctrl" id="btn-new-score"  aria-label="新しい楽譜">📷</button>
+  </div>
+  <div class="divider"></div>
+  <div class="controls-panel">
+    <div class="control-row">
+      <span class="control-label">テンポ</span>
+      <input type="range" id="tempo-slider" min="40" max="240" value="120" step="1">
+      <span class="control-value" id="tempo-display">120</span>
+    </div>
+    <div class="control-row">
+      <span class="control-label">音量</span>
+      <input type="range" id="volume-slider" min="0" max="100" value="80" step="1">
+      <span class="control-value"></span>
+    </div>
+    <div class="instrument-row">
+      <span class="control-label">音色</span>
+      <select id="instrument-select">
+        <option value="piano">ピアノ</option>
+        <option value="marimba">マリンバ</option>
+        <option value="flute">フルート</option>
+        <option value="strings">ストリングス</option>
+      </select>
+    </div>
+  </div>
+  <button class="btn-text-small" id="btn-back">← 別の楽譜を撮影</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+<script>
+/* ═══════════════════════════════════════════════════════
+   MusicXML Parser
+═══════════════════════════════════════════════════════ */
+function parseMusicXML(xmlString) {
+  const doc = new DOMParser().parseFromString(xmlString, 'application/xml');
+  if (doc.querySelector('parsererror')) throw new Error('XML 解析エラー');
+
+  let divisions = 1, bpm = 120, timeBeats = 4, timeBeatType = 4;
+  const titleEl = doc.querySelector('work-title, movement-title, credit-words');
+  const title = titleEl ? titleEl.textContent.trim() : '';
+  const notes = [];
+  let cursor = 0;
+
+  doc.querySelectorAll('measure').forEach(m => {
+    const d = m.querySelector('divisions');            if (d) divisions = parseInt(d.textContent);
+    const tb = m.querySelector('time > beats');        if (tb) timeBeats = parseInt(tb.textContent);
+    const tbt = m.querySelector('time > beat-type');   if (tbt) timeBeatType = parseInt(tbt.textContent);
+    const s = m.querySelector('sound[tempo]');         if (s)  bpm = parseFloat(s.getAttribute('tempo'));
+
+    let pos = 0;
+    m.querySelectorAll('note').forEach(n => {
+      const durEl = n.querySelector('duration');
+      const durQN = durEl ? parseInt(durEl.textContent) / divisions : 0;
+      const isRest  = !!n.querySelector('rest');
+      const isChord = !!n.querySelector('chord');
+      if (isChord && notes.length > 0) pos -= notes[notes.length - 1].duration;
+
+      if (!isRest) {
+        const p = n.querySelector('pitch');
+        if (p) {
+          const step = p.querySelector('step').textContent.trim();
+          const oct  = p.querySelector('octave').textContent.trim();
+          const alt  = p.querySelector('alter');
+          const a    = alt ? Math.round(parseFloat(alt.textContent)) : 0;
+          notes.push({ note: step + (a===1?'#':a===-1?'b':'') + oct, time: cursor + pos, duration: durQN });
+        }
+      }
+      pos += durQN;
+    });
+    cursor += (timeBeats / timeBeatType) * 4;
+  });
+
+  return { notes, bpm, timeBeats, timeBeatType, title };
+}
+
+/* ═══════════════════════════════════════════════════════
+   Player
+═══════════════════════════════════════════════════════ */
+class Player {
+  constructor() {
+    this.synth = null; this.part = null;
+    this.notes = []; this.bpm = 120;
+    this.volume = 80; this.instrument = 'piano';
+    this.onNotePlay = null; this.onEnd = null;
+  }
+
+  async init() { await Tone.start(); this._buildSynth(); }
+
+  _buildSynth() {
+    if (this.synth) this.synth.dispose();
+    const presets = {
+      piano:   { oscillator:{type:'triangle'}, envelope:{attack:0.01,decay:0.3,sustain:0.3,release:1.2} },
+      marimba: { oscillator:{type:'sine'},     envelope:{attack:0.001,decay:0.4,sustain:0,release:0.4}  },
+      flute:   { oscillator:{type:'sine'},     envelope:{attack:0.1,decay:0.1,sustain:0.8,release:0.5}  },
+      strings: { oscillator:{type:'sawtooth'}, envelope:{attack:0.3,decay:0.1,sustain:0.8,release:0.8}  },
+    };
+    this.synth = new Tone.PolySynth(Tone.Synth, presets[this.instrument] || presets.piano).toDestination();
+    this._applyVol();
+  }
+
+  _applyVol() {
+    if (!this.synth) return;
+    this.synth.volume.value = this.volume === 0 ? -Infinity : (this.volume / 100) * 40 - 40;
+  }
+
+  load(data) { this.notes = data.notes; this.bpm = data.bpm; this._buildPart(); }
+
+  _buildPart() {
+    Tone.Transport.cancel(); Tone.Transport.stop(); Tone.Transport.position = 0;
+    if (this.part) { this.part.dispose(); this.part = null; }
+    if (!this.notes.length) return;
+
+    const spb = 60 / this.bpm;
+    const events = this.notes.map((n, i) => [
+      n.time * spb,
+      { note: n.note, dur: Math.max(n.duration * spb * 0.85, 0.05), idx: i }
+    ]);
+
+    this.part = new Tone.Part((time, val) => {
+      try { this.synth.triggerAttackRelease(val.note, val.dur, time); } catch(e) {}
+      if (this.onNotePlay) Tone.getDraw().schedule(() => this.onNotePlay(val.idx), time);
+    }, events);
+    this.part.start(0);
+
+    const total = this.notes.reduce((mx, n) => Math.max(mx, n.time + n.duration), 0) * spb;
+    Tone.Transport.schedule(t => {
+      if (this.onEnd) Tone.getDraw().schedule(() => this.onEnd(), t);
+    }, total + 0.3);
+  }
+
+  play() { Tone.Transport.start(); }
+  pause() { Tone.Transport.pause(); }
+  stop() { Tone.Transport.stop(); Tone.Transport.position = 0; }
+  isPlaying() { return Tone.Transport.state === 'started'; }
+  isPaused()  { return Tone.Transport.state === 'paused'; }
+
+  setTempo(bpm) { const was = this.isPlaying(); this.bpm = bpm; this._buildPart(); if (was) Tone.Transport.start(); }
+  setVolume(v) { this.volume = v; this._applyVol(); }
+  setInstrument(name) { this.instrument = name; this._buildSynth(); }
+  dispose() { this.stop(); if (this.part) this.part.dispose(); if (this.synth) this.synth.dispose(); }
+}
+
+/* ═══════════════════════════════════════════════════════
+   Camera
+═══════════════════════════════════════════════════════ */
+class Camera {
+  constructor() { this.stream = null; this.video = null; this.canvas = null; }
+
+  async start(video, canvas) {
+    this.video = video; this.canvas = canvas;
+    const c = { video: { facingMode:{ideal:'environment'}, width:{ideal:1920}, height:{ideal:1080} } };
+    try { this.stream = await navigator.mediaDevices.getUserMedia(c); }
+    catch { this.stream = await navigator.mediaDevices.getUserMedia({ video: true }); }
+    video.srcObject = this.stream;
+    await new Promise(r => { video.onloadedmetadata = r; });
+    await video.play();
+  }
+
+  stop() {
+    if (this.stream) { this.stream.getTracks().forEach(t => t.stop()); this.stream = null; }
+    if (this.video) this.video.srcObject = null;
+  }
+
+  capture() {
+    const v = this.video, c = this.canvas;
+    c.width = v.videoWidth || 1280; c.height = v.videoHeight || 720;
+    c.getContext('2d').drawImage(v, 0, 0);
+    return c.toDataURL('image/jpeg', 0.92);
+  }
+
+  static isAvailable() { return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia); }
+}
+
+/* ═══════════════════════════════════════════════════════
+   OMR  (set OMR_API_URL to enable real recognition)
+═══════════════════════════════════════════════════════ */
+const OMR_API_URL = ''; // 例: 'https://your-space.hf.space/run/predict'
+
+async function recognizeScore(dataUrl) {
+  if (!OMR_API_URL) throw new Error('OMR_API_URL 未設定');
+  const r = await fetch(OMR_API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data: [{ name:'score.jpg', data: dataUrl }] }),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const j = await r.json();
+  const xml = j.data?.[0];
+  if (!xml) throw new Error('空の応答');
+  return xml;
+}
+
+async function recognizeScoreDemo() {
+  await new Promise(r => setTimeout(r, 2000));
+  return SAMPLE_XML;
+}
+
+const SAMPLE_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <work><work-title>キラキラ星</work-title></work>
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <key><fifths>0</fifths></key>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+      </attributes>
+      <direction><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>120</per-minute></metronome></direction-type><sound tempo="120"/></direction>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>2</duration><type>half</type></note>
+    </measure>
+    <measure number="3">
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+    </measure>
+    <measure number="4">
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><type>half</type></note>
+    </measure>
+    <measure number="5">
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+    </measure>
+    <measure number="6">
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><type>half</type></note>
+    </measure>
+    <measure number="7">
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+    </measure>
+    <measure number="8">
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><type>half</type></note>
+    </measure>
+    <measure number="9">
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+    </measure>
+    <measure number="10">
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>2</duration><type>half</type></note>
+    </measure>
+    <measure number="11">
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+    </measure>
+    <measure number="12">
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><type>half</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+/* ═══════════════════════════════════════════════════════
+   App controller
+═══════════════════════════════════════════════════════ */
+const cam    = new Camera();
+const player = new Player();
+let captured = null;
+let parsed   = null;
+
+const $ = id => document.getElementById(id);
+
+function showScreen(name) {
+  ['home','preview','processing','player'].forEach(s => {
+    $('screen-' + s).hidden = s !== name;
+  });
+}
+
+function showError(msg) { $('error-msg').textContent = msg; $('error-banner').hidden = false; }
+function hideError()    { $('error-banner').hidden = true; }
+$('btn-error-close').onclick = hideError;
+
+/* Camera */
+async function startCamera() {
+  if (!Camera.isAvailable()) { $('btn-capture').disabled = true; return; }
+  try { await cam.start($('camera-video'), $('camera-canvas')); }
+  catch { showError('カメラへのアクセスが拒否されました。ファイルまたはデモをお使いください。'); $('btn-capture').disabled = true; }
+}
+
+$('btn-capture').onclick = () => {
+  captured = cam.capture();
+  $('preview-img').src = captured;
+  cam.stop();
+  showScreen('preview');
+};
+
+$('btn-upload').onclick = () => $('file-input').click();
+$('file-input').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  const r = new FileReader();
+  r.onload = ev => { captured = ev.target.result; $('preview-img').src = captured; cam.stop(); showScreen('preview'); };
+  r.readAsDataURL(f);
+  $('file-input').value = '';
+};
+
+$('btn-demo').onclick = async () => {
+  hideError(); showScreen('processing'); $('processing-msg').textContent = 'デモ楽譜を読み込み中…';
+  try { await loadScore(await recognizeScoreDemo(), 'デモ（キラキラ星）'); }
+  catch(e) { showError('デモ読み込みエラー: ' + e.message); showScreen('home'); }
+};
+
+/* Preview */
+$('btn-retake').onclick = async () => { showScreen('home'); await startCamera(); };
+$('btn-recognize').onclick = async () => {
+  hideError(); showScreen('processing'); $('processing-msg').textContent = '楽譜を認識中…';
+  try {
+    let xml;
+    if (OMR_API_URL) { xml = await recognizeScore(captured); }
+    else { showError('OMR_API_URL 未設定のため、デモ楽譜で代替します。'); xml = await recognizeScoreDemo(); }
+    await loadScore(xml, '認識された楽譜');
+  } catch(e) { showError('認識エラー: ' + e.message); showScreen('preview'); }
+};
+
+/* Load score */
+async function loadScore(xml, fallback) {
+  parsed = parseMusicXML(xml);
+  if (!parsed.notes.length) throw new Error('音符が見つかりません');
+  await player.init();
+  player.load(parsed);
+  player.setVolume(parseInt($('volume-slider').value));
+
+  player.onNotePlay = i => {
+    $('note-display').textContent = parsed.notes[i]?.note ?? '';
+    highlightChip(i);
+  };
+  player.onEnd = () => {
+    $('btn-play-pause').textContent = '▶';
+    $('note-display').textContent = '';
+    highlightChip(-1);
+  };
+
+  $('score-title').textContent = parsed.title || fallback;
+  $('score-meta').textContent  = `${parsed.timeBeats}/${parsed.timeBeatType}  ♩=${Math.round(parsed.bpm)}`;
+  $('tempo-slider').value      = parsed.bpm;
+  $('tempo-display').textContent = Math.round(parsed.bpm);
+
+  buildRoll();
+  showScreen('player');
+  player.play();
+  $('btn-play-pause').textContent = '⏸';
+}
+
+/* Note roll */
+function buildRoll() {
+  const roll = $('note-roll'); roll.innerHTML = '';
+  parsed.notes.forEach((n, i) => {
+    const s = document.createElement('span');
+    s.className = 'note-chip'; s.dataset.i = i;
+    s.textContent = n.note.replace(/\d/,'');
+    roll.appendChild(s);
+  });
+}
+function highlightChip(active) {
+  $('note-roll').querySelectorAll('.note-chip').forEach(c => {
+    const i = parseInt(c.dataset.i);
+    c.classList.toggle('active', i === active);
+    c.classList.toggle('played', i < active);
+  });
+  const a = $('note-roll').querySelector('.active');
+  if (a) a.scrollIntoView({ inline:'center', behavior:'smooth', block:'nearest' });
+}
+
+/* Player controls */
+$('btn-play-pause').onclick = async () => {
+  await Tone.start();
+  if (player.isPlaying()) {
+    player.pause(); $('btn-play-pause').textContent = '▶';
+  } else {
+    player.play(); $('btn-play-pause').textContent = '⏸';
+  }
+};
+$('btn-stop').onclick = () => {
+  player.stop(); $('btn-play-pause').textContent = '▶';
+  $('note-display').textContent = ''; highlightChip(-1);
+};
+const goHome = async () => { player.stop(); showScreen('home'); await startCamera(); };
+$('btn-new-score').onclick = goHome;
+$('btn-back').onclick = goHome;
+
+$('tempo-slider').oninput = () => {
+  const b = parseInt($('tempo-slider').value);
+  $('tempo-display').textContent = b;
+  player.setTempo(b);
+  $('btn-play-pause').textContent = '▶';
+};
+$('volume-slider').oninput  = () => player.setVolume(parseInt($('volume-slider').value));
+$('instrument-select').onchange = () => player.setInstrument($('instrument-select').value);
+
+/* Boot */
+(async () => { showScreen('home'); await startCamera(); })();
+</script>
+</body>
+</html>
