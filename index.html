@@ -325,11 +325,8 @@
       APIキー取得：<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">aistudio.google.com/app/apikey</a>
     </p>
     <input type="password" id="gemini-key-input" placeholder="AIza..." autocomplete="off">
-    <select id="gemini-model-select">
-      <option value="gemini-1.5-pro">gemini-1.5-pro（高精度・推奨）</option>
-      <option value="gemini-1.5-flash">gemini-1.5-flash（高速・無制限）</option>
-      <option value="gemini-2.0-flash">gemini-2.0-flash（最新）</option>
-    </select>
+    <input type="text" id="gemini-model-select" placeholder="例: gemini-2.0-flash" autocomplete="off">
+    <p style="font-size:11px;margin-top:-8px;">利用可能なモデルは <a href="https://aistudio.google.com" target="_blank" rel="noopener">AI Studio</a> で確認できます</p>
     <div class="overlay-buttons">
       <button class="overlay-btn-cancel" id="btn-settings-cancel">キャンセル</button>
       <button class="overlay-btn-save" id="btn-settings-save">保存</button>
@@ -575,7 +572,7 @@ class Camera {
 ═══════════════════════════════════════════════════════ */
 async function recognizeScore(dataUrl) {
   const apiKey = localStorage.getItem('gemini_api_key') || '';
-  const model  = localStorage.getItem('gemini_model')   || 'gemini-1.5-pro';
+  const model  = localStorage.getItem('gemini_model')   || 'gemini-2.0-flash';
   if (!apiKey) { openSettings(); throw new Error('Gemini APIキーを設定してください（⚙ボタン）'); }
 
   const base64   = dataUrl.split(',')[1];
@@ -593,7 +590,7 @@ async function recognizeScore(dataUrl) {
 - コードブロック・説明・前置き・補足は絶対に含めないこと`;
 
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -844,8 +841,7 @@ $('instrument-select').onchange = () => player.setInstrument($('instrument-selec
 /* Settings */
 function openSettings() {
   $('gemini-key-input').value = localStorage.getItem('gemini_api_key') || '';
-  const sel = $('gemini-model-select');
-  sel.value = localStorage.getItem('gemini_model') || 'gemini-1.5-pro';
+  $('gemini-model-select').value = localStorage.getItem('gemini_model') || 'gemini-2.0-flash';
   $('settings-overlay').hidden = false;
 }
 $('btn-settings').onclick = openSettings;
