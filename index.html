@@ -466,38 +466,85 @@ function buildScore(data) {
 /* ═══════════════════════════════════════════════════════
    Player
 ═══════════════════════════════════════════════════════ */
+// Salamander Grand Piano（実機録音）。短3度ごとに1音読み、
+// 間の音はサンプラーがピッチシフトで補う。
+const PIANO_SAMPLES = {
+  'C2':'C2.mp3','D#2':'Ds2.mp3','F#2':'Fs2.mp3','A2':'A2.mp3',
+  'C3':'C3.mp3','D#3':'Ds3.mp3','F#3':'Fs3.mp3','A3':'A3.mp3',
+  'C4':'C4.mp3','D#4':'Ds4.mp3','F#4':'Fs4.mp3','A4':'A4.mp3',
+  'C5':'C5.mp3','D#5':'Ds5.mp3','F#5':'Fs5.mp3','A5':'A5.mp3',
+  'C6':'C6.mp3',
+};
+const PIANO_BASE_URL = 'https://tonejs.github.io/audio/salamander/';
+
 class Player {
   constructor() {
-    this.synth = null; this.part = null;
+    this.voice = null; this.part = null; this.reverb = null;
+    this.piano = null;            // 読み込んだサンプラーは使い回す
     this.notes = []; this.bpm = 120;
     this.volume = 80; this.instrument = 'piano';
     this.onNotePlay = null; this.onEnd = null;
   }
 
-  async init() {
+  async init(onStatus) {
     // Tone.start() は user gesture が失効していると永久に解決しないため、
     // 3秒で打ち切って UI を固めない（音は次回の ▶ タップで有効になる）
     if (Tone.getContext().state !== 'running') {
       await Promise.race([Tone.start().catch(() => {}), new Promise(r => setTimeout(r, 3000))]);
     }
-    this._buildSynth();
+    // 演奏空間の響き。これが無いとサンプルでも硬く痩せて聞こえる。
+    if (!this.reverb) this.reverb = new Tone.Reverb({ decay: 1.8, wet: 0.22 }).toDestination();
+    await this.setInstrument(this.instrument, onStatus);
   }
 
-  _buildSynth() {
-    if (this.synth) this.synth.dispose();
+  async setInstrument(name, onStatus) {
+    this.instrument = name;
+    const voice = name === 'piano'
+      ? (await this._loadPiano(onStatus)) ?? this._buildSynth('piano')
+      : this._buildSynth(name);
+
+    // 合成音は使い捨て、ピアノのサンプラーは保持する
+    if (this.voice && this.voice !== voice && this.voice !== this.piano) this.voice.dispose();
+    this.voice = voice;
+    this._applyVol();
+  }
+
+  // 音源が落とせない環境では null を返し、呼び出し側が合成音に切り替える
+  async _loadPiano(onStatus) {
+    if (this.piano) return this.piano;
+    onStatus?.('ピアノ音源を読み込み中…');
+    try {
+      const sampler = new Tone.Sampler({
+        urls: PIANO_SAMPLES,
+        baseUrl: PIANO_BASE_URL,
+        release: 1.4,
+      }).connect(this.reverb);
+
+      await Promise.race([
+        Tone.loaded().catch(() => {}),
+        new Promise(r => setTimeout(r, 25000)),
+      ]);
+      // Tone.loaded() は取得に失敗しても解決しうるので、実体の有無で判定する
+      if (!sampler.loaded) { sampler.dispose(); return null; }
+
+      this.piano = sampler;
+      return sampler;
+    } catch { return null; }
+  }
+
+  _buildSynth(name) {
     const presets = {
       piano:   { oscillator:{type:'triangle'}, envelope:{attack:0.01,decay:0.3,sustain:0.3,release:1.2} },
       marimba: { oscillator:{type:'sine'},     envelope:{attack:0.001,decay:0.4,sustain:0,release:0.4}  },
       flute:   { oscillator:{type:'sine'},     envelope:{attack:0.1,decay:0.1,sustain:0.8,release:0.5}  },
       strings: { oscillator:{type:'sawtooth'}, envelope:{attack:0.3,decay:0.1,sustain:0.8,release:0.8}  },
     };
-    this.synth = new Tone.PolySynth(Tone.Synth, presets[this.instrument] || presets.piano).toDestination();
-    this._applyVol();
+    return new Tone.PolySynth(Tone.Synth, presets[name] || presets.piano).connect(this.reverb);
   }
 
   _applyVol() {
-    if (!this.synth) return;
-    this.synth.volume.value = this.volume === 0 ? -Infinity : (this.volume / 100) * 40 - 40;
+    if (!this.voice) return;
+    this.voice.volume.value = this.volume === 0 ? -Infinity : (this.volume / 100) * 40 - 40;
   }
 
   load(data) { this.notes = data.notes; this.bpm = data.bpm; this._buildPart(); }
@@ -508,13 +555,15 @@ class Player {
     if (!this.notes.length) return;
 
     const spb = 60 / this.bpm;
+    // 実際のピアノは鍵を離しても音が伸びる。0.85 で切ると歯切れが良すぎるので
+    // やや長めに取り、サンプラー側の release で自然に減衰させる。
     const events = this.notes.map((n, i) => [
       n.time * spb,
-      { note: n.note, dur: Math.max(n.duration * spb * 0.85, 0.05), idx: i }
+      { note: n.note, dur: Math.max(n.duration * spb * 0.95, 0.08), idx: i }
     ]);
 
     this.part = new Tone.Part((time, val) => {
-      try { this.synth.triggerAttackRelease(val.note, val.dur, time); } catch(e) {}
+      try { this.voice.triggerAttackRelease(val.note, val.dur, time); } catch(e) {}
       if (this.onNotePlay) Tone.getDraw().schedule(() => this.onNotePlay(val.idx), time);
     }, events);
     this.part.start(0);
@@ -533,8 +582,6 @@ class Player {
 
   setTempo(bpm) { const was = this.isPlaying(); this.bpm = bpm; this._buildPart(); if (was) Tone.Transport.start(); }
   setVolume(v) { this.volume = v; this._applyVol(); }
-  setInstrument(name) { this.instrument = name; this._buildSynth(); }
-  dispose() { this.stop(); if (this.part) this.part.dispose(); if (this.synth) this.synth.dispose(); }
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -882,7 +929,7 @@ $('btn-recognize').onclick = async () => {
     await Promise.race([
       (async () => {
         const data = await recognizeScore(captured, n => { label = `混雑のため再試行中（${n}回目）…`; });
-        await loadScore(data, '認識された楽譜');
+        await loadScore(data, '認識された楽譜', msg => { label = msg; });
       })(),
       hardTimeout
     ]);
@@ -895,10 +942,10 @@ $('btn-recognize').onclick = async () => {
 };
 
 /* Load score */
-async function loadScore(data, fallback) {
+async function loadScore(data, fallback, onStatus) {
   parsed = buildScore(data);
   if (!parsed.notes.length) throw new Error('音符を読み取れませんでした。楽譜が大きく写るように撮り直してください');
-  await player.init();
+  await player.init(onStatus ?? (msg => { $('processing-msg').textContent = msg; }));
   player.load(parsed);
   player.setVolume(parseInt($('volume-slider').value));
 
@@ -967,7 +1014,13 @@ $('tempo-slider').oninput = () => {
   $('btn-play-pause').textContent = player.isPlaying() ? '⏸' : '▶';
 };
 $('volume-slider').oninput  = () => player.setVolume(parseInt($('volume-slider').value));
-$('instrument-select').onchange = () => player.setInstrument($('instrument-select').value);
+$('instrument-select').onchange = async () => {
+  const sel = $('instrument-select');
+  sel.disabled = true;
+  try { await player.setInstrument(sel.value); }
+  catch(e) { showError('音色の切り替えに失敗しました: ' + e.message); }
+  finally { sel.disabled = false; }
+};
 
 /* Settings */
 function openSettings() {
