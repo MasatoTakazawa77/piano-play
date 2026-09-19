@@ -818,11 +818,29 @@ $('btn-demo').onclick = async () => {
 /* Preview */
 $('btn-retake').onclick = async () => { showScreen('home'); await startCamera(); };
 $('btn-recognize').onclick = async () => {
-  hideError(); showScreen('processing'); $('processing-msg').textContent = '楽譜を認識中…';
+  hideError(); showScreen('processing');
+
+  // 経過秒数を表示（フリーズしているのか通信中なのかを判別できるように）
+  let elapsed = 0;
+  $('processing-msg').textContent = '楽譜を認識中… 0秒';
+  const tick = setInterval(() => {
+    elapsed++;
+    $('processing-msg').textContent = `楽譜を認識中… ${elapsed}秒`;
+  }, 1000);
+
+  // AbortController が効かない環境でも必ず UI を解放するハードタイムアウト
+  const hardTimeout = new Promise((_, rej) =>
+    setTimeout(() => rej(new Error('応答がありません（70秒）。通信環境を変えて再試行してください')), 70000)
+  );
+
   try {
-    const xml = await recognizeScore(captured);
+    const xml = await Promise.race([recognizeScore(captured), hardTimeout]);
     await loadScore(xml, '認識された楽譜');
-  } catch(e) { showError('認識エラー: ' + e.message); showScreen('preview'); }
+  } catch(e) {
+    showError('認識エラー: ' + e.message); showScreen('preview');
+  } finally {
+    clearInterval(tick);
+  }
 };
 
 /* Load score */
