@@ -327,7 +327,12 @@
       APIキー取得：<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">aistudio.google.com/app/apikey</a>
     </p>
     <input type="password" id="gemini-key-input" placeholder="AIza..." autocomplete="off">
-    <input type="text" id="gemini-model-select" placeholder="例: gemini-2.0-flash" autocomplete="off">
+    <input type="text" id="gemini-model-select" placeholder="例: gemini-2.5-flash" autocomplete="off">
+    <p style="margin-top:-6px;font-size:12px;">
+      楽譜が違う曲になる場合はモデルを変えてください。<br>
+      精度：<strong>gemini-2.5-pro</strong> ＞ gemini-2.5-flash ＞ gemini-2.0-flash<br>
+      速度・無料枠はこの逆順です。
+    </p>
     <div style="display:flex;align-items:center;gap:10px;">
       <span style="font-size:13px;color:var(--text-muted);white-space:nowrap;">認識小節数</span>
       <select id="gemini-measures" style="flex:1;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:8px 10px;font:inherit;font-size:14px;">
@@ -353,7 +358,7 @@
 
 <!-- HOME -->
 <div id="screen-home" class="screen">
-  <div class="camera-hint">楽譜をカメラに向けて撮影</div>
+  <div class="camera-hint">1段が画面いっぱいに写るように撮影</div>
   <button id="btn-settings" class="btn-settings" aria-label="設定">⚙</button>
   <video id="camera-video" autoplay playsinline muted></video>
   <canvas id="camera-canvas"></canvas>
@@ -460,7 +465,12 @@ function buildScore(data) {
   });
 
   notes.sort((a, b) => a.time - b.time);
-  return { notes, bpm, beats, beatType, title };
+  return {
+    notes, bpm, beats, beatType, title,
+    clef:     String(data?.clef    ?? '').trim(),
+    keyName:  String(data?.keyName ?? '').trim(),
+    observed: String(data?.observed ?? '').trim(),
+  };
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -638,9 +648,14 @@ class Camera {
    OMR — Gemini Vision API (無料、バックエンド不要)
    APIキー取得: https://aistudio.google.com/app/apikey
 ═══════════════════════════════════════════════════════ */
+// プロパティは記載順に生成されるため、音符より前に観察項目を置く。
+// 先に譜面を読ませてから書かせることで当てずっぽうを減らす。
 const SCORE_SCHEMA = {
   type: 'OBJECT',
   properties: {
+    observed: { type: 'STRING' },   // 何が見えているかを先に言語化させる
+    clef:     { type: 'STRING' },
+    keyName:  { type: 'STRING' },
     title:    { type: 'STRING'  },
     bpm:      { type: 'NUMBER'  },
     beats:    { type: 'INTEGER' },
@@ -667,12 +682,12 @@ const SCORE_SCHEMA = {
       }
     }
   },
-  required: ['bpm', 'beats', 'beatType', 'measures']
+  required: ['observed', 'clef', 'keyName', 'bpm', 'beats', 'beatType', 'measures']
 };
 
-// 送信サイズを抑える。1920x1080/q0.92 は base64 で約1MBになり、
-// モバイル回線では送信だけで数十秒かかる。
-async function shrinkImage(dataUrl, maxSide = 1400, quality = 0.8) {
+// 五線譜は線の間隔で音高が決まるため、縮小しすぎると音符の位置が潰れて
+// 読み取れなくなる。送信は重くなるが解像度を優先する。
+async function shrinkImage(dataUrl, maxSide = 2048, quality = 0.92) {
   const img = await new Promise((res, rej) => {
     const i = new Image();
     i.onload  = () => res(i);
@@ -722,7 +737,7 @@ async function recognizeScore(rawDataUrl, onRetry) {
 
 async function callGemini(rawDataUrl) {
   const apiKey = localStorage.getItem('gemini_api_key') || '';
-  const model  = (localStorage.getItem('gemini_model') || '').trim() || 'gemini-2.0-flash';
+  const model  = (localStorage.getItem('gemini_model') || '').trim() || 'gemini-2.5-flash';
   if (!apiKey) { openSettings(); throw new Error('Gemini APIキーを設定してください（⚙ボタン）'); }
 
   const dataUrl  = await shrinkImage(rawDataUrl);
@@ -730,17 +745,39 @@ async function callGemini(rawDataUrl) {
   const mimeType = dataUrl.split(';')[0].slice(5);
 
   const measures = parseInt(localStorage.getItem('gemini_measures') || '4');
-  const prompt = `この楽譜画像を読み取ってください。
+  const prompt = `この楽譜画像を正確に読み取ってください。一番上の段の、左端から${measures}小節だけが対象です。
 
-- 最初の${measures}小節だけを読むこと（超えないこと）
-- measures 配列は小節ごとに1要素
-- n = 音名+オクターブ（例: C4, F#5, Bb3）。中央ハ = C4
+【手順】必ず observed から順に埋めること。
+
+observed: 音符を書き出す前に、見えているものを言葉で書く。
+  ① 何段の譜表があるか（ピアノ譜なら大譜表2段）
+  ② 各段の音部記号（ト音記号 / ヘ音記号）
+  ③ 調号（♯♭が何個、どの線か）と拍子記号
+  ④ 対象${measures}小節に見える音符を、小節ごとに順番に
+     「符頭が第何線上か／第何間か、符尾の向き、符幹と旗の数」で記述する
+clef: 上段の音部記号（treble / bass）
+keyName: 調（例: C major, G major, F major）
+
+【音高の決め方】符頭が五線のどこにあるかで決まる。形や雰囲気で推測しないこと。
+- ト音記号：下から第1線=E4、第1間=F4、第2線=G4、第2間=A4、第3線=B4、第3間=C5、第4線=D5、第4間=E5、第5線=F5
+- ヘ音記号：下から第1線=G2、第1間=A2、第2線=B2、第2間=C3、第3線=D3、第3間=E3、第4線=F3、第4間=G3、第5線=A3
+- 調号と臨時記号を必ず音名に反映する（ト長調ならFは全てF#）
+
+【長さの決め方】符頭の塗りと符尾で決まる。
+- 全音符（白・符尾なし）=4.0、2分音符（白・符尾あり）=2.0
+- 4分音符（黒・符尾あり）=1.0、8分音符（旗1本）=0.5、16分音符（旗2本）=0.25
+- 付点はその1.5倍
+
+【出力規則】
+- measures は小節ごとに1要素。${measures}小節を超えないこと
+- n = 音名+オクターブ（中央ハ = C4）
 - t = その小節の先頭からの開始位置。4分音符 = 1.0、小節の先頭 = 0
-- d = 音の長さ。4分音符 = 1.0、8分音符 = 0.5、2分音符 = 2.0、全音符 = 4.0
+- 各小節の音の長さの合計が拍子と合うか確認すること（4/4なら4.0）
 - 和音は t が同じ複数の音として並べる
-- ピアノ譜は右手・左手の両方を、同じ小節の notes にまとめて入れる
-- 休符は出力しない（音を入れなければ無音になる）
-- bpm は楽譜の速度標語から推定（不明なら 100）`;
+- ピアノ譜は右手・左手の両方を、同じ小節の notes にまとめる
+- 休符は出力しない（その分 t を進める）
+- bpm は速度標語から推定（不明なら 100）
+- 読み取れない音は推測で埋めず、読み取れた音だけを出力すること`;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 45000);
@@ -987,7 +1024,13 @@ async function loadScore(data, fallback, onStatus) {
   };
 
   $('score-title').textContent = parsed.title || fallback;
-  $('score-meta').textContent  = `${parsed.beats}/${parsed.beatType}  ♩=${Math.round(parsed.bpm)}  ${parsed.notes.length}音`;
+  // 調や拍子が違っていれば誤認識がひと目で分かる
+  $('score-meta').textContent = [
+    parsed.keyName,
+    `${parsed.beats}/${parsed.beatType}`,
+    `♩=${Math.round(parsed.bpm)}`,
+    `${parsed.notes.length}音`
+  ].filter(Boolean).join('  ');
   $('tempo-slider').value      = parsed.bpm;
   $('tempo-display').textContent = Math.round(parsed.bpm);
 
@@ -1064,7 +1107,7 @@ $('instrument-select').onchange = async () => {
 /* Settings */
 function openSettings() {
   $('gemini-key-input').value = localStorage.getItem('gemini_api_key') || '';
-  $('gemini-model-select').value   = localStorage.getItem('gemini_model')   || 'gemini-2.0-flash';
+  $('gemini-model-select').value   = localStorage.getItem('gemini_model')   || 'gemini-2.5-flash';
   $('gemini-measures').value       = localStorage.getItem('gemini_measures') || '4';
   $('settings-overlay').hidden = false;
 }
@@ -1099,7 +1142,7 @@ $('btn-settings').onclick = openSettings;
 $('btn-settings-cancel').onclick = () => { $('settings-overlay').hidden = true; };
 $('btn-settings-save').onclick = () => {
   const key   = $('gemini-key-input').value.trim();
-  const model = $('gemini-model-select').value.trim() || 'gemini-2.0-flash';
+  const model = $('gemini-model-select').value.trim() || 'gemini-2.5-flash';
   if (key) localStorage.setItem('gemini_api_key', key);
   else     localStorage.removeItem('gemini_api_key');
   localStorage.setItem('gemini_model',   model);
