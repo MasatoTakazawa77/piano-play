@@ -590,16 +590,20 @@ async function recognizeScore(dataUrl) {
   const base64   = dataUrl.split(',')[1];
   const mimeType = dataUrl.split(';')[0].slice(5);
 
-  const measures = parseInt(localStorage.getItem('gemini_measures') || '8');
-  const prompt = `この楽譜画像の最初の${measures}小節をMusicXML（score-partwise バージョン3.1）に変換してください。
+  const measures = parseInt(localStorage.getItem('gemini_measures') || '4');
+  const prompt = `楽譜画像をMusicXMLに変換してください。
 
-ルール：
+【必須】出力の最初の文字は必ず以下の行から始めること：
+<?xml version="1.0" encoding="UTF-8"?>
+
+変換ルール：
+- 最初の${measures}小節のみ出力（超えないこと）
 - ピアノ譜の場合、右手（Treble clef）と左手（Bass clef）を別パートで出力
-- 和音は <chord> タグで表現
+- 和音は <chord/> タグで表現
 - 調号・拍子記号・テンポを含める
 - <?xml から </score-partwise> までのMusicXMLのみ返すこと
-- コードブロック・説明・前置き・補足は絶対に含めないこと
-- ${measures}小節を超えないこと`;
+- コードブロック（\`\`\`）・説明文・前置き・補足は絶対に含めないこと
+- XMLの途中から出力を開始しないこと`;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 60000);
@@ -613,11 +617,12 @@ async function recognizeScore(dataUrl) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+        system_instruction: { parts: [{ text: 'You are a MusicXML converter. Output ONLY raw MusicXML. Always start with exactly: <?xml version="1.0" encoding="UTF-8"?>. Never add explanations, markdown, or code blocks.' }] },
         contents: [{ parts: [
           { text: prompt },
           { inline_data: { mime_type: mimeType, data: base64 } }
         ]}],
-        generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
+        generationConfig: { temperature: 0.1, maxOutputTokens: 4096 }
       })
     });
   } catch(e) {
@@ -647,8 +652,15 @@ async function recognizeScore(dataUrl) {
   let t = text.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').replace(/`/g, '');
 
   // score-partwise の開始を探す
-  const start = t.indexOf('<?xml') !== -1 ? t.indexOf('<?xml') : t.indexOf('<score-partwise');
-  if (start === -1) throw new Error('MusicXMLが見つかりません。\n返答の冒頭:\n' + text.slice(0, 300));
+  let start = t.indexOf('<?xml');
+  if (start === -1) start = t.indexOf('<score-partwise');
+  if (start === -1) {
+    // XML要素はあるが先頭が欠けている場合
+    if (/<[a-z]/i.test(t)) {
+      throw new Error('XMLの先頭（<?xml）が見つかりません。⚙で小節数を「4」以下に減らして再試行してください。\n返答の冒頭:\n' + text.slice(0, 200));
+    }
+    throw new Error('MusicXMLが見つかりません。\n返答の冒頭:\n' + text.slice(0, 300));
+  }
   t = t.slice(start);
 
   // DOCTYPE除去（DOMParserが外部DTDに詰まる）
