@@ -615,28 +615,28 @@ async function recognizeScore(dataUrl) {
   const j    = await res.json();
   const text = j.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 
-  // コードブロックを除去してからXMLを探す
-  const stripped = text.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '');
+  // コードブロック除去
+  let t = text.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '');
 
-  // 完全なXMLを試みる
-  let xml = (stripped.match(/<\?xml[\s\S]*?<\/score-partwise>/) ||
-             stripped.match(/<score-partwise[\s\S]*?<\/score-partwise>/))?.[0];
+  // score-partwise の開始を探す
+  const start = t.indexOf('<?xml') !== -1 ? t.indexOf('<?xml') : t.indexOf('<score-partwise');
+  if (start === -1) throw new Error('MusicXMLが見つかりません。\n返答の冒頭:\n' + text.slice(0, 300));
+  t = t.slice(start);
 
-  // 閉じタグなし（トークン上限で途中切断）→ 切れた箇所を閉じて使う
-  if (!xml) {
-    const s = stripped.indexOf('<?xml');
-    const s2 = stripped.indexOf('<score-partwise');
-    const start = s !== -1 ? s : s2;
-    if (start === -1) throw new Error('MusicXMLを抽出できませんでした。\n返答の冒頭:\n' + text.slice(0, 300));
-    xml = stripped.slice(start);
-    if (!xml.includes('</measure>')) xml += '\n</note></measure>';
-    else if (!xml.trimEnd().endsWith('</measure>')) xml += '\n</measure>';
-    if (!xml.includes('</part>'))          xml += '\n</part>';
-    if (!xml.includes('</score-partwise>')) xml += '\n</score-partwise>';
+  // DOCTYPE除去（DOMParserが外部DTDに詰まる）
+  t = t.replace(/<!DOCTYPE[^>]*>/i, '');
+
+  // 閉じタグがない（途中切断）→ 最後の完全な </measure> で打ち切り
+  if (!t.includes('</score-partwise>')) {
+    const cut = t.lastIndexOf('</measure>');
+    if (cut === -1) throw new Error('有効な小節データがありません');
+    t = t.slice(0, cut + '</measure>'.length);
+    if (!t.includes('</part>')) t += '\n</part>';
+    t += '\n</score-partwise>';
   }
 
-  if (!xml.startsWith('<?xml')) xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + xml;
-  return xml;
+  if (!t.startsWith('<?xml')) t = '<?xml version="1.0" encoding="UTF-8"?>\n' + t;
+  return t;
 }
 
 async function recognizeScoreDemo() {
