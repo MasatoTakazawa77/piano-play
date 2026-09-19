@@ -625,14 +625,22 @@ async function recognizeScore(dataUrl) {
     if (e.name === 'AbortError') throw new Error('タイムアウト（60秒）。ネットワークを確認してください');
     throw e;
   }
-  clearTimeout(timer);
 
   if (!res.ok) {
+    clearTimeout(timer);
     const e = await res.json().catch(() => ({}));
     throw new Error(e.error?.message || `HTTP ${res.status}`);
   }
 
-  const j    = await res.json();
+  let j;
+  try {
+    j = await res.json();
+  } catch(e) {
+    clearTimeout(timer);
+    if (e.name === 'AbortError') throw new Error('タイムアウト（60秒）レスポンス読み込み中。再試行してください');
+    throw e;
+  }
+  clearTimeout(timer);
   const text = j.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 
   // コードブロック・バッククォート除去（Geminiがタグを `<tag>` 形式で返す場合）
