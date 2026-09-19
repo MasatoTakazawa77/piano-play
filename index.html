@@ -621,11 +621,43 @@ async function shrinkImage(dataUrl, maxSide = 1400, quality = 0.8) {
   return c.toDataURL('image/jpeg', quality);
 }
 
-async function recognizeScore(rawDataUrl) {
+// サーバー側の一時的な事情によるもの。時間をおけば同じ要求が通る。
+const TRANSIENT_STATUS = new Set([429, 500, 502, 503, 504]);
+
+// 混雑（503）・レート制限（429）は数秒待てば解消することが多いので、
+// ユーザーに手動で押し直させず自動で再試行する。
+async function recognizeScore(rawDataUrl, onRetry) {
+  if (!rawDataUrl) throw new Error('画像がありません。撮り直してください');
+
+  const MAX_ATTEMPTS = 3;
+  const deadline = Date.now() + 100000;
+  let lastErr;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      return await callGemini(rawDataUrl);
+    } catch (e) {
+      lastErr = e;
+      if (!e.transient) throw e;
+      if (attempt === MAX_ATTEMPTS) break;
+
+      const wait = attempt * 3000;
+      // 次の試行が制限時間内に収まらないなら、待たずに諦める
+      if (Date.now() + wait + 20000 > deadline) break;
+      onRetry?.(attempt + 1);
+      await new Promise(r => setTimeout(r, wait));
+    }
+  }
+  if (lastErr?.transient) {
+    throw new Error(lastErr.message + '\n\n自動で3回試しましたが混雑が続いています。1〜2分待つか、⚙ で gemini-2.0-flash など軽いモデルに変えてお試しください');
+  }
+  throw lastErr;
+}
+
+async function callGemini(rawDataUrl) {
   const apiKey = localStorage.getItem('gemini_api_key') || '';
   const model  = (localStorage.getItem('gemini_model') || '').trim() || 'gemini-2.0-flash';
   if (!apiKey) { openSettings(); throw new Error('Gemini APIキーを設定してください（⚙ボタン）'); }
-  if (!rawDataUrl) throw new Error('画像がありません。撮り直してください');
 
   const dataUrl  = await shrinkImage(rawDataUrl);
   const base64   = dataUrl.split(',')[1];
@@ -645,7 +677,7 @@ async function recognizeScore(rawDataUrl) {
 - bpm は楽譜の速度標語から推定（不明なら 100）`;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 60000);
+  const timer = setTimeout(() => controller.abort(), 45000);
 
   let res;
   try {
@@ -672,14 +704,18 @@ async function recognizeScore(rawDataUrl) {
     });
   } catch(e) {
     clearTimeout(timer);
-    if (e.name === 'AbortError') throw new Error('タイムアウト（60秒）。ネットワークを確認してください');
+    if (e.name === 'AbortError') throw new Error('タイムアウト（45秒）。ネットワークを確認してください');
+    // 接続断・DNS失敗などは再試行で回復しうる
+    e.transient = true;
     throw e;
   }
 
   if (!res.ok) {
     clearTimeout(timer);
-    const e = await res.json().catch(() => ({}));
-    throw new Error(e.error?.message || `HTTP ${res.status}`);
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error?.message || `HTTP ${res.status}`);
+    err.transient = TRANSIENT_STATUS.has(res.status);
+    throw err;
   }
 
   let j;
@@ -687,7 +723,8 @@ async function recognizeScore(rawDataUrl) {
     j = await res.json();
   } catch(e) {
     clearTimeout(timer);
-    if (e.name === 'AbortError') throw new Error('タイムアウト（60秒）レスポンス読み込み中。再試行してください');
+    if (e.name === 'AbortError') throw new Error('タイムアウト（45秒）レスポンス読み込み中。再試行してください');
+    e.transient = true;
     throw e;
   }
   clearTimeout(timer);
@@ -829,23 +866,23 @@ $('btn-recognize').onclick = async () => {
   showScreen('processing');
 
   // 経過秒数を表示（フリーズしているのか通信中なのかを判別できるように）
-  let elapsed = 0;
-  $('processing-msg').textContent = '楽譜を認識中… 0秒';
+  let elapsed = 0, label = '楽譜を認識中…';
+  $('processing-msg').textContent = `${label} 0秒`;
   const tick = setInterval(() => {
-    $('processing-msg').textContent = `楽譜を認識中… ${++elapsed}秒`;
+    $('processing-msg').textContent = `${label} ${++elapsed}秒`;
   }, 1000);
 
   // 認識・読み込みのどこで固まっても必ず UI を解放するハードタイムアウト
   let hardTimer;
   const hardTimeout = new Promise((_, rej) => {
-    hardTimer = setTimeout(() => rej(new Error('応答がありません（90秒）。通信環境を変えて再試行してください')), 90000);
+    hardTimer = setTimeout(() => rej(new Error('応答がありません（120秒）。通信環境を変えて再試行してください')), 120000);
   });
 
   try {
     await Promise.race([
       (async () => {
-        const xml = await recognizeScore(captured);
-        await loadScore(xml, '認識された楽譜');
+        const data = await recognizeScore(captured, n => { label = `混雑のため再試行中（${n}回目）…`; });
+        await loadScore(data, '認識された楽譜');
       })(),
       hardTimeout
     ]);
