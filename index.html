@@ -601,20 +601,31 @@ async function recognizeScore(dataUrl) {
 - コードブロック・説明・前置き・補足は絶対に含めないこと
 - ${measures}小節を超えないこと`;
 
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60000);
+
+  let res;
+  try {
+    res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      {
+        signal: controller.signal,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
         contents: [{ parts: [
           { text: prompt },
           { inline_data: { mime_type: mimeType, data: base64 } }
         ]}],
         generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
       })
-    }
-  );
+    });
+  } catch(e) {
+    clearTimeout(timer);
+    if (e.name === 'AbortError') throw new Error('タイムアウト（60秒）。ネットワークを確認してください');
+    throw e;
+  }
+  clearTimeout(timer);
 
   if (!res.ok) {
     const e = await res.json().catch(() => ({}));
