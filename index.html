@@ -624,8 +624,8 @@ async function recognizeScore(dataUrl) {
   const j    = await res.json();
   const text = j.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 
-  // コードブロック除去
-  let t = text.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '');
+  // コードブロック・バッククォート除去（Geminiがタグを `<tag>` 形式で返す場合）
+  let t = text.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').replace(/`/g, '');
 
   // score-partwise の開始を探す
   const start = t.indexOf('<?xml') !== -1 ? t.indexOf('<?xml') : t.indexOf('<score-partwise');
