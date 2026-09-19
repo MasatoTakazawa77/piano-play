@@ -493,9 +493,20 @@ class Player {
       await Promise.race([Tone.start().catch(() => {}), new Promise(r => setTimeout(r, 3000))]);
     }
     // 演奏空間の響き。これが無いとサンプルでも硬く痩せて聞こえる。
-    if (!this.reverb) this.reverb = new Tone.Reverb({ decay: 1.8, wet: 0.22 }).toDestination();
+    // インパルス応答の生成が終わる前に音を流すと無音になるため必ず待つ
+    // （低速な端末で顕在化する）。生成できない場合は響き無しで直結する。
+    if (!this.reverb) {
+      try {
+        const rv = new Tone.Reverb({ decay: 1.8, wet: 0.22 });
+        await Promise.race([rv.generate(), new Promise((_, rej) => setTimeout(rej, 5000))]);
+        this.reverb = rv.toDestination();
+      } catch { this.reverb = null; }
+    }
     await this.setInstrument(this.instrument, onStatus);
   }
+
+  // リバーブを作れなかった場合は出力に直結する
+  _out(node) { return this.reverb ? node.connect(this.reverb) : node.toDestination(); }
 
   async setInstrument(name, onStatus) {
     this.instrument = name;
@@ -514,11 +525,11 @@ class Player {
     if (this.piano) return this.piano;
     onStatus?.('ピアノ音源を読み込み中…');
     try {
-      const sampler = new Tone.Sampler({
+      const sampler = this._out(new Tone.Sampler({
         urls: PIANO_SAMPLES,
         baseUrl: PIANO_BASE_URL,
         release: 1.4,
-      }).connect(this.reverb);
+      }));
 
       await Promise.race([
         Tone.loaded().catch(() => {}),
@@ -539,7 +550,7 @@ class Player {
       flute:   { oscillator:{type:'sine'},     envelope:{attack:0.1,decay:0.1,sustain:0.8,release:0.5}  },
       strings: { oscillator:{type:'sawtooth'}, envelope:{attack:0.3,decay:0.1,sustain:0.8,release:0.8}  },
     };
-    return new Tone.PolySynth(Tone.Synth, presets[name] || presets.piano).connect(this.reverb);
+    return this._out(new Tone.PolySynth(Tone.Synth, presets[name] || presets.piano));
   }
 
   _applyVol() {
@@ -574,7 +585,15 @@ class Player {
     }, total + 0.3);
   }
 
-  play() { Tone.Transport.start(); }
+  // 出力が開いているか。閉じたまま Transport を回すと
+  // エラーも出ずに無音のまま進んでしまうので、呼び出し側で必ず確認する。
+  audioReady() { return Tone.getContext().state === 'running'; }
+
+  play() {
+    // gesture が無いと解決しないので待たない
+    if (!this.audioReady()) Tone.getContext().resume?.();
+    Tone.Transport.start();
+  }
   pause() { Tone.Transport.pause(); }
   stop() { Tone.Transport.stop(); Tone.Transport.position = 0; }
   isPlaying() { return Tone.Transport.state === 'started'; }
@@ -868,13 +887,14 @@ async function startCamera() {
 }
 
 $('btn-capture').onclick = () => {
+  unlockAudio();   // タップのたびに解錠を試みる（iOS は機会が多いほど確実）
   captured = cam.capture();
   $('preview-img').src = captured;
   cam.stop();
   showScreen('preview');
 };
 
-$('btn-upload').onclick = () => $('file-input').click();
+$('btn-upload').onclick = () => { unlockAudio(); $('file-input').click(); };
 $('file-input').onchange = e => {
   const f = e.target.files[0]; if (!f) return;
   const r = new FileReader();
@@ -890,6 +910,13 @@ async function unlockAudio() {
     if (Tone.getContext().state !== 'running') {
       await Promise.race([Tone.start(), new Promise(r => setTimeout(r, 1500))]);
     }
+    // iOS は resume() だけでは出力経路が開かず、ジェスチャ中に
+    // 実際に音を流して初めて開くことがある（無音バッファで十分）。
+    const ctx = Tone.getContext().rawContext ?? Tone.getContext();
+    const src = ctx.createBufferSource();
+    src.buffer = ctx.createBuffer(1, 1, 22050);
+    src.connect(ctx.destination);
+    src.start(0);
   } catch {}
 }
 
@@ -966,8 +993,16 @@ async function loadScore(data, fallback, onStatus) {
 
   buildRoll();
   showScreen('player');
-  player.play();
-  $('btn-play-pause').textContent = '⏸';
+
+  // 認識の待ち時間中に端末が出力を閉じることがある。その状態で再生を始めると
+  // 何のエラーも出ないまま無音で進むので、タップを促して確実に鳴らす。
+  if (player.audioReady()) {
+    player.play();
+    $('btn-play-pause').textContent = '⏸';
+  } else {
+    $('btn-play-pause').textContent = '▶';
+    showError('▶ をタップすると再生します。音が出ない場合は端末のマナーモード（消音スイッチ）と音量をご確認ください');
+  }
 }
 
 /* Note roll */
@@ -992,11 +1027,15 @@ function highlightChip(active) {
 
 /* Player controls */
 $('btn-play-pause').onclick = async () => {
-  await Tone.start();
+  await unlockAudio();
   if (player.isPlaying()) {
     player.pause(); $('btn-play-pause').textContent = '▶';
   } else {
     player.play(); $('btn-play-pause').textContent = '⏸';
+    // タップしても開かないなら端末側の消音が原因
+    if (!player.audioReady()) {
+      showError('端末が音声を再生できない状態です。マナーモード（消音スイッチ）を解除し、音量を上げてからもう一度お試しください');
+    } else hideError();
   }
 };
 $('btn-stop').onclick = () => {
