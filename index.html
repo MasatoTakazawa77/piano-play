@@ -328,6 +328,15 @@
     </p>
     <input type="password" id="gemini-key-input" placeholder="AIza..." autocomplete="off">
     <input type="text" id="gemini-model-select" placeholder="例: gemini-2.0-flash" autocomplete="off">
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span style="font-size:13px;color:var(--text-muted);white-space:nowrap;">認識小節数</span>
+      <select id="gemini-measures" style="flex:1;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:8px 10px;font:inherit;font-size:14px;">
+        <option value="4">4小節</option>
+        <option value="8" selected>8小節（推奨）</option>
+        <option value="16">16小節</option>
+        <option value="32">32小節</option>
+      </select>
+    </div>
     <button type="button" id="btn-list-models" style="padding:8px 12px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:13px;color:var(--text);">利用可能なモデルを確認 →</button>
     <div id="model-list" style="font-size:12px;color:var(--text-muted);line-height:1.8;display:none;max-height:160px;overflow-y:auto;background:var(--surface-2);border-radius:8px;padding:8px 10px;"></div>
     <div class="overlay-buttons">
@@ -581,16 +590,16 @@ async function recognizeScore(dataUrl) {
   const base64   = dataUrl.split(',')[1];
   const mimeType = dataUrl.split(';')[0].slice(5);
 
-  const prompt = `この楽譜画像をMusicXML（score-partwise バージョン3.1）に完全変換してください。
+  const measures = parseInt(localStorage.getItem('gemini_measures') || '8');
+  const prompt = `この楽譜画像の最初の${measures}小節をMusicXML（score-partwise バージョン3.1）に変換してください。
 
 ルール：
-- ピアノ譜の場合、右手（高音部譜表 Treble）と左手（低音部譜表 Bass）を別パートで出力
-- 和音は <chord> タグで同時音符を表現
-- 全音符・二分音符・四分音符・付点・符点リズムも正確に記述
-- 調号（#・♭の数）・拍子記号・テンポを含める
-- 全小節を漏れなく出力
-- MusicXML（<?xml...>から</score-partwise>まで）のみ返すこと
-- コードブロック・説明・前置き・補足は絶対に含めないこと`;
+- ピアノ譜の場合、右手（Treble clef）と左手（Bass clef）を別パートで出力
+- 和音は <chord> タグで表現
+- 調号・拍子記号・テンポを含める
+- <?xml から </score-partwise> までのMusicXMLのみ返すこと
+- コードブロック・説明・前置き・補足は絶対に含めないこと
+- ${measures}小節を超えないこと`;
 
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
@@ -629,7 +638,7 @@ async function recognizeScore(dataUrl) {
   // 閉じタグがない（途中切断）→ 最後の完全な </measure> で打ち切り
   if (!t.includes('</score-partwise>')) {
     const cut = t.lastIndexOf('</measure>');
-    if (cut === -1) throw new Error('有効な小節データがありません');
+    if (cut === -1) throw new Error('有効な小節データがありません\n---\n' + t.slice(0, 600));
     t = t.slice(0, cut + '</measure>'.length);
     if (!t.includes('</part>')) t += '\n</part>';
     t += '\n</score-partwise>';
@@ -861,7 +870,8 @@ $('instrument-select').onchange = () => player.setInstrument($('instrument-selec
 /* Settings */
 function openSettings() {
   $('gemini-key-input').value = localStorage.getItem('gemini_api_key') || '';
-  $('gemini-model-select').value = localStorage.getItem('gemini_model') || 'gemini-2.0-flash';
+  $('gemini-model-select').value   = localStorage.getItem('gemini_model')   || 'gemini-2.0-flash';
+  $('gemini-measures').value       = localStorage.getItem('gemini_measures') || '8';
   $('settings-overlay').hidden = false;
 }
 $('btn-list-models').onclick = async () => {
@@ -888,7 +898,8 @@ $('btn-settings-save').onclick = () => {
   const model = $('gemini-model-select').value;
   if (key) localStorage.setItem('gemini_api_key', key);
   else     localStorage.removeItem('gemini_api_key');
-  localStorage.setItem('gemini_model', model);
+  localStorage.setItem('gemini_model',   model);
+  localStorage.setItem('gemini_measures', $('gemini-measures').value);
   $('settings-overlay').hidden = true;
 };
 
