@@ -425,71 +425,42 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
 <script>
 /* ═══════════════════════════════════════════════════════
-   MusicXML Parser
+   Score builder
+   Gemini が返す JSON（小節ごとの音符リスト）を再生用に展開する。
+   t/d は4分音符=1.0、t は小節先頭からの相対位置。
 ═══════════════════════════════════════════════════════ */
-function parseMusicXML(xmlString) {
-  const doc = new DOMParser().parseFromString(xmlString, 'application/xml');
-  if (doc.querySelector('parsererror')) throw new Error('XML 解析エラー');
 
-  let bpm = 120, timeBeats = 4, timeBeatType = 4;
-  const titleEl = doc.querySelector('work-title, movement-title, credit-words');
-  const title = titleEl ? titleEl.textContent.trim() : '';
-  const notes = [];
+// Tone が受け付ける音名に正規化する。不正なものは null（読み飛ばす）。
+function normalizeNote(raw) {
+  const m = String(raw ?? '').trim().match(/^([A-Ga-g])([#b]{0,2})(\d)$/);
+  if (!m) return null;
+  const oct = +m[3];
+  if (oct < 0 || oct > 8) return null;
+  return m[1].toUpperCase() + m[2] + oct;
+}
 
-  // パートごとに独立したタイムラインで処理（右手・左手対応）
-  const parts = doc.querySelectorAll('part');
-  const targets = parts.length > 0 ? parts : [doc]; // フォールバック
+function buildScore(data) {
+  const beats    = Number(data?.beats)    > 0 ? Number(data.beats)    : 4;
+  const beatType = Number(data?.beatType) > 0 ? Number(data.beatType) : 4;
+  const bpm      = Number(data?.bpm) >= 20 && Number(data.bpm) <= 300 ? Number(data.bpm) : 120;
+  const title    = String(data?.title ?? '').trim();
 
-  const num = (el, fallback) => {
-    const v = el ? parseFloat(el.textContent) : NaN;
-    return Number.isFinite(v) ? v : fallback;
-  };
+  const barLen = beats * (4 / beatType);   // 1小節の長さ（4分音符単位）
+  const notes  = [];
 
-  targets.forEach(part => {
-    let divisions = 1, cursor = 0, lastDur = 0;
-
-    part.querySelectorAll('measure').forEach(m => {
-      const dv = num(m.querySelector('divisions'), 0);        if (dv > 0) divisions    = dv;
-      const tb = num(m.querySelector('time > beats'), 0);     if (tb > 0) timeBeats    = tb;
-      const bt = num(m.querySelector('time > beat-type'), 0); if (bt > 0) timeBeatType = bt;
-      const s  = m.querySelector('sound[tempo]');
-      if (s) { const t = parseFloat(s.getAttribute('tempo')); if (t > 0) bpm = t; }
-
-      // note / backup / forward を文書順に処理する。
-      // <backup> はピアノ譜で1パートに両手を書くときに使われ、無視すると
-      // 左手が右手の後ろに直列に並んでしまう。
-      let pos = 0;
-      m.querySelectorAll('note, backup, forward').forEach(n => {
-        const tag   = n.tagName.toLowerCase();
-        const durQN = num(n.querySelector(':scope > duration'), 0) / divisions;
-
-        if (tag === 'backup')  { pos = Math.max(0, pos - durQN); lastDur = 0; return; }
-        if (tag === 'forward') { pos += durQN; lastDur = 0; return; }
-
-        if (n.querySelector(':scope > chord')) pos -= lastDur;
-
-        const p = n.querySelector(':scope > pitch');
-        if (p) {
-          const stepEl = p.querySelector('step'), octEl = p.querySelector('octave');
-          if (stepEl && octEl) {
-            const a = Math.round(num(p.querySelector('alter'), 0));
-            notes.push({
-              note: stepEl.textContent.trim() + (a === 1 ? '#' : a === -1 ? 'b' : '') + octEl.textContent.trim(),
-              time: cursor + pos,
-              duration: durQN
-            });
-          }
-        }
-        lastDur = durQN;
-        pos += durQN;
-      });
-      cursor += (timeBeats / timeBeatType) * 4;
+  (Array.isArray(data?.measures) ? data.measures : []).forEach((m, i) => {
+    const list = Array.isArray(m?.notes) ? m.notes : [];
+    list.forEach(o => {
+      const note = normalizeNote(o?.n);
+      const t = Number(o?.t), d = Number(o?.d);
+      if (!note || !Number.isFinite(t) || !Number.isFinite(d)) return;
+      if (t < 0 || d <= 0) return;
+      notes.push({ note, time: i * barLen + t, duration: d });
     });
   });
 
-  const clean = notes.filter(n => Number.isFinite(n.time) && n.time >= 0 && Number.isFinite(n.duration) && n.duration > 0);
-  clean.sort((a, b) => a.time - b.time);
-  return { notes: clean, bpm, timeBeats, timeBeatType, title };
+  notes.sort((a, b) => a.time - b.time);
+  return { notes, bpm, beats, beatType, title };
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -601,6 +572,38 @@ class Camera {
    OMR — Gemini Vision API (無料、バックエンド不要)
    APIキー取得: https://aistudio.google.com/app/apikey
 ═══════════════════════════════════════════════════════ */
+const SCORE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    title:    { type: 'STRING'  },
+    bpm:      { type: 'NUMBER'  },
+    beats:    { type: 'INTEGER' },
+    beatType: { type: 'INTEGER' },
+    measures: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          notes: {
+            type: 'ARRAY',
+            items: {
+              type: 'OBJECT',
+              properties: {
+                n: { type: 'STRING' },   // 音名+オクターブ
+                t: { type: 'NUMBER' },   // 小節内の開始位置（4分音符=1）
+                d: { type: 'NUMBER' }    // 長さ（4分音符=1）
+              },
+              required: ['n', 't', 'd']
+            }
+          }
+        },
+        required: ['notes']
+      }
+    }
+  },
+  required: ['bpm', 'beats', 'beatType', 'measures']
+};
+
 // 送信サイズを抑える。1920x1080/q0.92 は base64 で約1MBになり、
 // モバイル回線では送信だけで数十秒かかる。
 async function shrinkImage(dataUrl, maxSide = 1400, quality = 0.8) {
@@ -629,19 +632,17 @@ async function recognizeScore(rawDataUrl) {
   const mimeType = dataUrl.split(';')[0].slice(5);
 
   const measures = parseInt(localStorage.getItem('gemini_measures') || '4');
-  const prompt = `楽譜画像をMusicXMLに変換してください。
+  const prompt = `この楽譜画像を読み取ってください。
 
-【必須】出力の最初の文字は必ず以下の行から始めること：
-<?xml version="1.0" encoding="UTF-8"?>
-
-変換ルール：
-- 最初の${measures}小節のみ出力（超えないこと）
-- ピアノ譜の場合、右手（Treble clef）と左手（Bass clef）を別パートで出力
-- 和音は <chord/> タグで表現
-- 調号・拍子記号・テンポを含める
-- <?xml から </score-partwise> までのMusicXMLのみ返すこと
-- コードブロック（\`\`\`）・説明文・前置き・補足は絶対に含めないこと
-- XMLの途中から出力を開始しないこと`;
+- 最初の${measures}小節だけを読むこと（超えないこと）
+- measures 配列は小節ごとに1要素
+- n = 音名+オクターブ（例: C4, F#5, Bb3）。中央ハ = C4
+- t = その小節の先頭からの開始位置。4分音符 = 1.0、小節の先頭 = 0
+- d = 音の長さ。4分音符 = 1.0、8分音符 = 0.5、2分音符 = 2.0、全音符 = 4.0
+- 和音は t が同じ複数の音として並べる
+- ピアノ譜は右手・左手の両方を、同じ小節の notes にまとめて入れる
+- 休符は出力しない（音を入れなければ無音になる）
+- bpm は楽譜の速度標語から推定（不明なら 100）`;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 60000);
@@ -655,12 +656,18 @@ async function recognizeScore(rawDataUrl) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-        system_instruction: { parts: [{ text: 'You are a MusicXML converter. Output ONLY raw MusicXML. Always start with exactly: <?xml version="1.0" encoding="UTF-8"?>. Never add explanations, markdown, or code blocks.' }] },
         contents: [{ parts: [
           { text: prompt },
           { inline_data: { mime_type: mimeType, data: base64 } }
         ]}],
-        generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 8192,
+          // スキーマを指定すると API 側が構造を保証するため、
+          // コードブロック・前置き・タグ欠落といった崩れ方が原理的に起きない
+          responseMimeType: 'application/json',
+          responseSchema: SCORE_SCHEMA
+        }
       })
     });
   } catch(e) {
@@ -685,124 +692,69 @@ async function recognizeScore(rawDataUrl) {
   }
   clearTimeout(timer);
   const candidate = j.candidates?.[0] ?? {};
-  const finishReason = candidate.finishReason ?? 'UNKNOWN';
   const text = candidate.content?.parts?.[0]?.text ?? '';
 
-  // コードブロック・バッククォート除去（Geminiがタグを `<tag>` 形式で返す場合）
-  let t = text.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').replace(/`/g, '');
-
-  // score-partwise の開始を探す
-  let start = t.indexOf('<?xml');
-  if (start === -1) start = t.indexOf('<score-partwise');
-  if (start === -1) {
-    // XML要素はあるが先頭が欠けている場合
-    if (/<[a-z]/i.test(t)) {
-      throw new Error('XMLの先頭（<?xml）が見つかりません。⚙で小節数を「4」以下に減らして再試行してください。\n返答の冒頭:\n' + text.slice(0, 200));
-    }
-    throw new Error('MusicXMLが見つかりません。\n返答の冒頭:\n' + text.slice(0, 300));
-  }
-  t = t.slice(start);
-
-  // DOCTYPE除去（DOMParserが外部DTDに詰まる）
-  t = t.replace(/<!DOCTYPE[^>]*>/i, '');
-
-  // 閉じタグがない（途中切断）→ 最後の完全な </measure> で打ち切り
-  if (!t.includes('</score-partwise>')) {
-    const cut = t.lastIndexOf('</measure>');
-    if (cut === -1) throw new Error(`有効な小節データがありません (finishReason: ${finishReason}, 応答長: ${text.length}文字)\n---\n` + t.slice(0, 500));
-    t = t.slice(0, cut + '</measure>'.length);
-    if (!t.includes('</part>')) t += '\n</part>';
-    t += '\n</score-partwise>';
+  if (!text.trim()) {
+    const why = candidate.finishReason ?? j.promptFeedback?.blockReason ?? 'UNKNOWN';
+    throw new Error(`楽譜を読み取れませんでした (${why})。明るい場所で、楽譜が画面いっぱいに写るように撮影してください`);
   }
 
-  if (!t.startsWith('<?xml')) t = '<?xml version="1.0" encoding="UTF-8"?>\n' + t;
-  return t;
+  const data = parseScoreJSON(text);
+  if (!data) throw new Error('応答を解釈できませんでした。もう一度お試しください');
+  return data;
+}
+
+// スキーマ指定により通常は素の JSON が返る。
+// MAX_TOKENS で途中切断された場合だけ、閉じ括弧を補って復旧する。
+function parseScoreJSON(text) {
+  const s = text.trim().replace(/^```[a-z]*\n?/i, '').replace(/```$/, '').trim();
+  try { return JSON.parse(s); } catch {}
+
+  const cut = s.lastIndexOf('}');
+  if (cut === -1) return null;
+  let t = s.slice(0, cut + 1);
+
+  const open = [];
+  let inStr = false, esc = false;
+  for (const ch of t) {
+    if (esc)            { esc = false; continue; }
+    if (ch === '\\')    { esc = true;  continue; }
+    if (ch === '"')     { inStr = !inStr; continue; }
+    if (inStr)          continue;
+    if (ch === '{' || ch === '[') open.push(ch);
+    else if (ch === '}' || ch === ']') open.pop();
+  }
+  while (open.length) t += open.pop() === '{' ? '}' : ']';
+
+  try { return JSON.parse(t); } catch { return null; }
 }
 
 async function recognizeScoreDemo() {
-  await new Promise(r => setTimeout(r, 2000));
-  return SAMPLE_XML;
+  await new Promise(r => setTimeout(r, 800));
+  return SAMPLE_SCORE;
 }
 
-const SAMPLE_XML = `<?xml version="1.0" encoding="UTF-8"?>
-<score-partwise version="3.1">
-  <work><work-title>キラキラ星</work-title></work>
-  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
-  <part id="P1">
-    <measure number="1">
-      <attributes>
-        <divisions>1</divisions>
-        <key><fifths>0</fifths></key>
-        <time><beats>4</beats><beat-type>4</beat-type></time>
-      </attributes>
-      <direction><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>120</per-minute></metronome></direction-type><sound tempo="120"/></direction>
-      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-    </measure>
-    <measure number="2">
-      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>G</step><octave>4</octave></pitch><duration>2</duration><type>half</type></note>
-    </measure>
-    <measure number="3">
-      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-    </measure>
-    <measure number="4">
-      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><type>half</type></note>
-    </measure>
-    <measure number="5">
-      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-    </measure>
-    <measure number="6">
-      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><type>half</type></note>
-    </measure>
-    <measure number="7">
-      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-    </measure>
-    <measure number="8">
-      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><type>half</type></note>
-    </measure>
-    <measure number="9">
-      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-    </measure>
-    <measure number="10">
-      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>G</step><octave>4</octave></pitch><duration>2</duration><type>half</type></note>
-    </measure>
-    <measure number="11">
-      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-    </measure>
-    <measure number="12">
-      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><type>half</type></note>
-    </measure>
-  </part>
-</score-partwise>`;
+const SAMPLE_SCORE = (() => {
+  // 各小節を "音名[*長さ]" の並びで書く（長さ省略時は4分音符）
+  const bars = [
+    'C4 C4 G4 G4', 'A4 A4 G4*2', 'F4 F4 E4 E4', 'D4 D4 C4*2',
+    'G4 G4 F4 F4', 'E4 E4 D4*2', 'G4 G4 F4 F4', 'E4 E4 D4*2',
+    'C4 C4 G4 G4', 'A4 A4 G4*2', 'F4 F4 E4 E4', 'D4 D4 C4*2',
+  ];
+  return {
+    title: 'キラキラ星', bpm: 120, beats: 4, beatType: 4,
+    measures: bars.map(bar => {
+      let t = 0;
+      return { notes: bar.split(' ').map(tok => {
+        const [n, d] = tok.split('*');
+        const dur = d ? +d : 1;
+        const note = { n, t, d: dur };
+        t += dur;
+        return note;
+      })};
+    })
+  };
+})();
 
 /* ═══════════════════════════════════════════════════════
    App controller
@@ -906,9 +858,9 @@ $('btn-recognize').onclick = async () => {
 };
 
 /* Load score */
-async function loadScore(xml, fallback) {
-  parsed = parseMusicXML(xml);
-  if (!parsed.notes.length) throw new Error('音符が見つかりません');
+async function loadScore(data, fallback) {
+  parsed = buildScore(data);
+  if (!parsed.notes.length) throw new Error('音符を読み取れませんでした。楽譜が大きく写るように撮り直してください');
   await player.init();
   player.load(parsed);
   player.setVolume(parseInt($('volume-slider').value));
@@ -924,7 +876,7 @@ async function loadScore(xml, fallback) {
   };
 
   $('score-title').textContent = parsed.title || fallback;
-  $('score-meta').textContent  = `${parsed.timeBeats}/${parsed.timeBeatType}  ♩=${Math.round(parsed.bpm)}`;
+  $('score-meta').textContent  = `${parsed.beats}/${parsed.beatType}  ♩=${Math.round(parsed.bpm)}  ${parsed.notes.length}音`;
   $('tempo-slider').value      = parsed.bpm;
   $('tempo-display').textContent = Math.round(parsed.bpm);
 
