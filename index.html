@@ -490,12 +490,13 @@ async function recognizeScore(dataUrl) {
   const r = await fetch(OMR_API_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ data: [{ name:'score.jpg', data: dataUrl }] }),
+    body: JSON.stringify({ data: [dataUrl] }),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const j = await r.json();
   const xml = j.data?.[0];
   if (!xml) throw new Error('空の応答');
+  if (xml.startsWith('ERROR:')) throw new Error(xml.slice(7).trim());
   return xml;
 }
 
