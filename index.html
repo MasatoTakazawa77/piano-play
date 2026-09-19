@@ -129,6 +129,62 @@
     }
     .btn-round:active { background: var(--surface); }
 
+    /* Settings button */
+    .btn-settings {
+      position: absolute;
+      top: calc(var(--safe-top) + 12px);
+      right: 16px;
+      z-index: 3;
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      background: rgba(0,0,0,0.5);
+      color: rgba(255,255,255,0.8);
+      font-size: 18px;
+      display: flex; align-items: center; justify-content: center;
+      border: 1px solid rgba(255,255,255,0.25);
+    }
+
+    /* Overlay modal */
+    .overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.75);
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .overlay[hidden] { display: none; }
+    .overlay-card {
+      background: var(--surface);
+      border-radius: 16px;
+      padding: 24px;
+      width: 100%;
+      max-width: 360px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .overlay-card h2 { font-size: 17px; font-weight: 700; }
+    .overlay-card p { font-size: 13px; color: var(--text-muted); line-height: 1.6; }
+    .overlay-card a { color: var(--accent); }
+    .overlay-card input[type="password"],
+    .overlay-card input[type="text"] {
+      width: 100%;
+      padding: 12px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font: inherit;
+      font-size: 13px;
+    }
+    .overlay-buttons { display: flex; gap: 10px; }
+    .overlay-buttons button { flex: 1; padding: 12px; border-radius: 10px; font-size: 14px; font-weight: 600; }
+    .overlay-btn-cancel { background: var(--surface-2); border: 1px solid var(--border); }
+    .overlay-btn-save { background: var(--accent); color: #fff; }
+
     /* PREVIEW */
     #screen-preview { background: #000; }
     #preview-img { flex: 1; width: 100%; object-fit: contain; background: #000; }
@@ -260,6 +316,23 @@
 </head>
 <body>
 
+<!-- Settings overlay -->
+<div id="settings-overlay" class="overlay" hidden>
+  <div class="overlay-card">
+    <h2>⚙ Gemini API キー設定</h2>
+    <p>
+      楽譜認識に <strong>Google Gemini API</strong>（無料）を使います。<br>
+      キーの取得先：<br>
+      <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">aistudio.google.com/app/apikey</a>
+    </p>
+    <input type="password" id="gemini-key-input" placeholder="AIza..." autocomplete="off">
+    <div class="overlay-buttons">
+      <button class="overlay-btn-cancel" id="btn-settings-cancel">キャンセル</button>
+      <button class="overlay-btn-save" id="btn-settings-save">保存</button>
+    </div>
+  </div>
+</div>
+
 <div id="error-banner" hidden>
   <span id="error-msg"></span>
   <button id="btn-error-close" aria-label="閉じる">✕</button>
@@ -268,6 +341,7 @@
 <!-- HOME -->
 <div id="screen-home" class="screen">
   <div class="camera-hint">楽譜をカメラに向けて撮影</div>
+  <button id="btn-settings" class="btn-settings" aria-label="設定">⚙</button>
   <video id="camera-video" autoplay playsinline muted></video>
   <canvas id="camera-canvas"></canvas>
   <div class="capture-bar">
@@ -481,22 +555,43 @@ class Camera {
 }
 
 /* ═══════════════════════════════════════════════════════
-   OMR  (set OMR_API_URL to enable real recognition)
+   OMR — Gemini Vision API (無料、バックエンド不要)
+   APIキー取得: https://aistudio.google.com/app/apikey
 ═══════════════════════════════════════════════════════ */
-const OMR_API_URL = ''; // 例: 'https://your-space.hf.space/run/predict'
-
 async function recognizeScore(dataUrl) {
-  if (!OMR_API_URL) throw new Error('OMR_API_URL 未設定');
-  const r = await fetch(OMR_API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ data: [dataUrl] }),
-  });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  const j = await r.json();
-  const xml = j.data?.[0];
-  if (!xml) throw new Error('空の応答');
-  if (xml.startsWith('ERROR:')) throw new Error(xml.slice(7).trim());
+  const apiKey = localStorage.getItem('gemini_api_key') || '';
+  if (!apiKey) { openSettings(); throw new Error('Gemini APIキーを設定してください（⚙ボタン）'); }
+
+  const base64   = dataUrl.split(',')[1];
+  const mimeType = dataUrl.split(';')[0].slice(5);
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [
+          { text: 'この楽譜画像をMusicXML（score-partwise形式）に変換してください。拍子記号・調号・全音符（音高・音価）を含む完全なMusicXMLのみ返してください。コードブロック・説明・前置きは一切不要です。' },
+          { inline_data: { mime_type: mimeType, data: base64 } }
+        ]}],
+        generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
+      })
+    }
+  );
+
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    throw new Error(e.error?.message || `HTTP ${res.status}`);
+  }
+
+  const j    = await res.json();
+  const text = j.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+
+  let xml = (text.match(/<\?xml[\s\S]*?<\/score-partwise>/) ||
+             text.match(/<score-partwise[\s\S]*?<\/score-partwise>/))?.[0];
+  if (!xml) throw new Error('MusicXMLを抽出できませんでした');
+  if (!xml.startsWith('<?xml')) xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + xml;
   return xml;
 }
 
@@ -639,9 +734,7 @@ $('btn-retake').onclick = async () => { showScreen('home'); await startCamera();
 $('btn-recognize').onclick = async () => {
   hideError(); showScreen('processing'); $('processing-msg').textContent = '楽譜を認識中…';
   try {
-    let xml;
-    if (OMR_API_URL) { xml = await recognizeScore(captured); }
-    else { showError('OMR_API_URL 未設定のため、デモ楽譜で代替します。'); xml = await recognizeScoreDemo(); }
+    const xml = await recognizeScore(captured);
     await loadScore(xml, '認識された楽譜');
   } catch(e) { showError('認識エラー: ' + e.message); showScreen('preview'); }
 };
@@ -720,6 +813,20 @@ $('tempo-slider').oninput = () => {
 };
 $('volume-slider').oninput  = () => player.setVolume(parseInt($('volume-slider').value));
 $('instrument-select').onchange = () => player.setInstrument($('instrument-select').value);
+
+/* Settings */
+function openSettings() {
+  $('gemini-key-input').value = localStorage.getItem('gemini_api_key') || '';
+  $('settings-overlay').hidden = false;
+}
+$('btn-settings').onclick = openSettings;
+$('btn-settings-cancel').onclick = () => { $('settings-overlay').hidden = true; };
+$('btn-settings-save').onclick = () => {
+  const key = $('gemini-key-input').value.trim();
+  if (key) localStorage.setItem('gemini_api_key', key);
+  else localStorage.removeItem('gemini_api_key');
+  $('settings-overlay').hidden = true;
+};
 
 /* Boot */
 (async () => { showScreen('home'); await startCamera(); })();
