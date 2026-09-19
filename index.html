@@ -615,9 +615,11 @@ async function recognizeScore(dataUrl) {
   const j    = await res.json();
   const text = j.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 
-  let xml = (text.match(/<\?xml[\s\S]*?<\/score-partwise>/) ||
-             text.match(/<score-partwise[\s\S]*?<\/score-partwise>/))?.[0];
-  if (!xml) throw new Error('MusicXMLを抽出できませんでした');
+  // コードブロックを除去してからXMLを探す
+  const stripped = text.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '');
+  let xml = (stripped.match(/<\?xml[\s\S]*?<\/score-partwise>/) ||
+             stripped.match(/<score-partwise[\s\S]*?<\/score-partwise>/))?.[0];
+  if (!xml) throw new Error('MusicXMLを抽出できませんでした。\n返答の冒頭:\n' + text.slice(0, 200));
   if (!xml.startsWith('<?xml')) xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + xml;
   return xml;
 }
