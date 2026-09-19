@@ -622,7 +622,7 @@ async function recognizeScore(dataUrl) {
           { text: prompt },
           { inline_data: { mime_type: mimeType, data: base64 } }
         ]}],
-        generationConfig: { temperature: 0.1, maxOutputTokens: 4096 }
+        generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
       })
     });
   } catch(e) {
@@ -646,7 +646,9 @@ async function recognizeScore(dataUrl) {
     throw e;
   }
   clearTimeout(timer);
-  const text = j.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+  const candidate = j.candidates?.[0] ?? {};
+  const finishReason = candidate.finishReason ?? 'UNKNOWN';
+  const text = candidate.content?.parts?.[0]?.text ?? '';
 
   // コードブロック・バッククォート除去（Geminiがタグを `<tag>` 形式で返す場合）
   let t = text.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').replace(/`/g, '');
@@ -669,7 +671,7 @@ async function recognizeScore(dataUrl) {
   // 閉じタグがない（途中切断）→ 最後の完全な </measure> で打ち切り
   if (!t.includes('</score-partwise>')) {
     const cut = t.lastIndexOf('</measure>');
-    if (cut === -1) throw new Error('有効な小節データがありません\n---\n' + t.slice(0, 600));
+    if (cut === -1) throw new Error(`有効な小節データがありません (finishReason: ${finishReason}, 応答長: ${text.length}文字)\n---\n` + t.slice(0, 500));
     t = t.slice(0, cut + '</measure>'.length);
     if (!t.includes('</part>')) t += '\n</part>';
     t += '\n</score-partwise>';
