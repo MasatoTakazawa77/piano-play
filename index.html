@@ -319,13 +319,17 @@
 <!-- Settings overlay -->
 <div id="settings-overlay" class="overlay" hidden>
   <div class="overlay-card">
-    <h2>⚙ Gemini API キー設定</h2>
+    <h2>⚙ Gemini API 設定</h2>
     <p>
       楽譜認識に <strong>Google Gemini API</strong>（無料）を使います。<br>
-      キーの取得先：<br>
-      <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">aistudio.google.com/app/apikey</a>
+      APIキー取得：<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">aistudio.google.com/app/apikey</a>
     </p>
     <input type="password" id="gemini-key-input" placeholder="AIza..." autocomplete="off">
+    <select id="gemini-model-select">
+      <option value="gemini-1.5-pro">gemini-1.5-pro（高精度・推奨）</option>
+      <option value="gemini-1.5-flash">gemini-1.5-flash（高速・無制限）</option>
+      <option value="gemini-2.0-flash">gemini-2.0-flash（最新）</option>
+    </select>
     <div class="overlay-buttons">
       <button class="overlay-btn-cancel" id="btn-settings-cancel">キャンセル</button>
       <button class="overlay-btn-save" id="btn-settings-save">保存</button>
@@ -418,41 +422,52 @@ function parseMusicXML(xmlString) {
   const doc = new DOMParser().parseFromString(xmlString, 'application/xml');
   if (doc.querySelector('parsererror')) throw new Error('XML 解析エラー');
 
-  let divisions = 1, bpm = 120, timeBeats = 4, timeBeatType = 4;
+  let bpm = 120, timeBeats = 4, timeBeatType = 4;
   const titleEl = doc.querySelector('work-title, movement-title, credit-words');
   const title = titleEl ? titleEl.textContent.trim() : '';
   const notes = [];
-  let cursor = 0;
 
-  doc.querySelectorAll('measure').forEach(m => {
-    const d = m.querySelector('divisions');            if (d) divisions = parseInt(d.textContent);
-    const tb = m.querySelector('time > beats');        if (tb) timeBeats = parseInt(tb.textContent);
-    const tbt = m.querySelector('time > beat-type');   if (tbt) timeBeatType = parseInt(tbt.textContent);
-    const s = m.querySelector('sound[tempo]');         if (s)  bpm = parseFloat(s.getAttribute('tempo'));
+  // パートごとに独立したタイムラインで処理（右手・左手対応）
+  const parts = doc.querySelectorAll('part');
+  const targets = parts.length > 0 ? parts : [doc]; // フォールバック
 
-    let pos = 0;
-    m.querySelectorAll('note').forEach(n => {
-      const durEl = n.querySelector('duration');
-      const durQN = durEl ? parseInt(durEl.textContent) / divisions : 0;
-      const isRest  = !!n.querySelector('rest');
-      const isChord = !!n.querySelector('chord');
-      if (isChord && notes.length > 0) pos -= notes[notes.length - 1].duration;
+  targets.forEach(part => {
+    let divisions = 1, cursor = 0, lastDur = 0;
 
-      if (!isRest) {
-        const p = n.querySelector('pitch');
-        if (p) {
-          const step = p.querySelector('step').textContent.trim();
-          const oct  = p.querySelector('octave').textContent.trim();
-          const alt  = p.querySelector('alter');
-          const a    = alt ? Math.round(parseFloat(alt.textContent)) : 0;
-          notes.push({ note: step + (a===1?'#':a===-1?'b':'') + oct, time: cursor + pos, duration: durQN });
+    part.querySelectorAll('measure').forEach(m => {
+      const d   = m.querySelector('divisions');         if (d)   divisions    = parseInt(d.textContent);
+      const tb  = m.querySelector('time > beats');      if (tb)  timeBeats    = parseInt(tb.textContent);
+      const tbt = m.querySelector('time > beat-type');  if (tbt) timeBeatType = parseInt(tbt.textContent);
+      const s   = m.querySelector('sound[tempo]');      if (s)   bpm          = parseFloat(s.getAttribute('tempo'));
+
+      let pos = 0;
+      m.querySelectorAll('note').forEach(n => {
+        const durEl  = n.querySelector('duration');
+        const durQN  = durEl ? parseInt(durEl.textContent) / divisions : 0;
+        const isRest  = !!n.querySelector('rest');
+        const isChord = !!n.querySelector('chord');
+        if (isChord) pos -= lastDur;
+
+        if (!isRest) {
+          const p = n.querySelector('pitch');
+          if (p) {
+            const step = p.querySelector('step').textContent.trim();
+            const oct  = p.querySelector('octave').textContent.trim();
+            const alt  = p.querySelector('alter');
+            const a    = alt ? Math.round(parseFloat(alt.textContent)) : 0;
+            notes.push({ note: step + (a===1?'#':a===-1?'b':'') + oct, time: cursor + pos, duration: durQN });
+            lastDur = durQN;
+          }
+        } else {
+          lastDur = durQN;
         }
-      }
-      pos += durQN;
+        pos += durQN;
+      });
+      cursor += (timeBeats / timeBeatType) * 4;
     });
-    cursor += (timeBeats / timeBeatType) * 4;
   });
 
+  notes.sort((a, b) => a.time - b.time);
   return { notes, bpm, timeBeats, timeBeatType, title };
 }
 
@@ -560,19 +575,31 @@ class Camera {
 ═══════════════════════════════════════════════════════ */
 async function recognizeScore(dataUrl) {
   const apiKey = localStorage.getItem('gemini_api_key') || '';
+  const model  = localStorage.getItem('gemini_model')   || 'gemini-1.5-pro';
   if (!apiKey) { openSettings(); throw new Error('Gemini APIキーを設定してください（⚙ボタン）'); }
 
   const base64   = dataUrl.split(',')[1];
   const mimeType = dataUrl.split(';')[0].slice(5);
 
+  const prompt = `この楽譜画像をMusicXML（score-partwise バージョン3.1）に完全変換してください。
+
+ルール：
+- ピアノ譜の場合、右手（高音部譜表 Treble）と左手（低音部譜表 Bass）を別パートで出力
+- 和音は <chord> タグで同時音符を表現
+- 全音符・二分音符・四分音符・付点・符点リズムも正確に記述
+- 調号（#・♭の数）・拍子記号・テンポを含める
+- 全小節を漏れなく出力
+- MusicXML（<?xml...>から</score-partwise>まで）のみ返すこと
+- コードブロック・説明・前置き・補足は絶対に含めないこと`;
+
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ parts: [
-          { text: 'この楽譜画像をMusicXML（score-partwise形式）に変換してください。拍子記号・調号・全音符（音高・音価）を含む完全なMusicXMLのみ返してください。コードブロック・説明・前置きは一切不要です。' },
+          { text: prompt },
           { inline_data: { mime_type: mimeType, data: base64 } }
         ]}],
         generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
@@ -817,14 +844,18 @@ $('instrument-select').onchange = () => player.setInstrument($('instrument-selec
 /* Settings */
 function openSettings() {
   $('gemini-key-input').value = localStorage.getItem('gemini_api_key') || '';
+  const sel = $('gemini-model-select');
+  sel.value = localStorage.getItem('gemini_model') || 'gemini-1.5-pro';
   $('settings-overlay').hidden = false;
 }
 $('btn-settings').onclick = openSettings;
 $('btn-settings-cancel').onclick = () => { $('settings-overlay').hidden = true; };
 $('btn-settings-save').onclick = () => {
-  const key = $('gemini-key-input').value.trim();
+  const key   = $('gemini-key-input').value.trim();
+  const model = $('gemini-model-select').value;
   if (key) localStorage.setItem('gemini_api_key', key);
-  else localStorage.removeItem('gemini_api_key');
+  else     localStorage.removeItem('gemini_api_key');
+  localStorage.setItem('gemini_model', model);
   $('settings-overlay').hidden = true;
 };
 
