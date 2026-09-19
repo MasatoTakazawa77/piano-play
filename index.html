@@ -331,8 +331,8 @@
     <div style="display:flex;align-items:center;gap:10px;">
       <span style="font-size:13px;color:var(--text-muted);white-space:nowrap;">認識小節数</span>
       <select id="gemini-measures" style="flex:1;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:8px 10px;font:inherit;font-size:14px;">
-        <option value="4">4小節</option>
-        <option value="8" selected>8小節（推奨）</option>
+        <option value="4" selected>4小節（推奨）</option>
+        <option value="8">8小節</option>
         <option value="16">16小節</option>
         <option value="32">32小節</option>
       </select>
@@ -440,44 +440,56 @@ function parseMusicXML(xmlString) {
   const parts = doc.querySelectorAll('part');
   const targets = parts.length > 0 ? parts : [doc]; // フォールバック
 
+  const num = (el, fallback) => {
+    const v = el ? parseFloat(el.textContent) : NaN;
+    return Number.isFinite(v) ? v : fallback;
+  };
+
   targets.forEach(part => {
     let divisions = 1, cursor = 0, lastDur = 0;
 
     part.querySelectorAll('measure').forEach(m => {
-      const d   = m.querySelector('divisions');         if (d)   divisions    = parseInt(d.textContent);
-      const tb  = m.querySelector('time > beats');      if (tb)  timeBeats    = parseInt(tb.textContent);
-      const tbt = m.querySelector('time > beat-type');  if (tbt) timeBeatType = parseInt(tbt.textContent);
-      const s   = m.querySelector('sound[tempo]');      if (s)   bpm          = parseFloat(s.getAttribute('tempo'));
+      const dv = num(m.querySelector('divisions'), 0);        if (dv > 0) divisions    = dv;
+      const tb = num(m.querySelector('time > beats'), 0);     if (tb > 0) timeBeats    = tb;
+      const bt = num(m.querySelector('time > beat-type'), 0); if (bt > 0) timeBeatType = bt;
+      const s  = m.querySelector('sound[tempo]');
+      if (s) { const t = parseFloat(s.getAttribute('tempo')); if (t > 0) bpm = t; }
 
+      // note / backup / forward を文書順に処理する。
+      // <backup> はピアノ譜で1パートに両手を書くときに使われ、無視すると
+      // 左手が右手の後ろに直列に並んでしまう。
       let pos = 0;
-      m.querySelectorAll('note').forEach(n => {
-        const durEl  = n.querySelector('duration');
-        const durQN  = durEl ? parseInt(durEl.textContent) / divisions : 0;
-        const isRest  = !!n.querySelector('rest');
-        const isChord = !!n.querySelector('chord');
-        if (isChord) pos -= lastDur;
+      m.querySelectorAll('note, backup, forward').forEach(n => {
+        const tag   = n.tagName.toLowerCase();
+        const durQN = num(n.querySelector(':scope > duration'), 0) / divisions;
 
-        if (!isRest) {
-          const p = n.querySelector('pitch');
-          if (p) {
-            const step = p.querySelector('step').textContent.trim();
-            const oct  = p.querySelector('octave').textContent.trim();
-            const alt  = p.querySelector('alter');
-            const a    = alt ? Math.round(parseFloat(alt.textContent)) : 0;
-            notes.push({ note: step + (a===1?'#':a===-1?'b':'') + oct, time: cursor + pos, duration: durQN });
-            lastDur = durQN;
+        if (tag === 'backup')  { pos = Math.max(0, pos - durQN); lastDur = 0; return; }
+        if (tag === 'forward') { pos += durQN; lastDur = 0; return; }
+
+        if (n.querySelector(':scope > chord')) pos -= lastDur;
+
+        const p = n.querySelector(':scope > pitch');
+        if (p) {
+          const stepEl = p.querySelector('step'), octEl = p.querySelector('octave');
+          if (stepEl && octEl) {
+            const a = Math.round(num(p.querySelector('alter'), 0));
+            notes.push({
+              note: stepEl.textContent.trim() + (a === 1 ? '#' : a === -1 ? 'b' : '') + octEl.textContent.trim(),
+              time: cursor + pos,
+              duration: durQN
+            });
           }
-        } else {
-          lastDur = durQN;
         }
+        lastDur = durQN;
         pos += durQN;
       });
       cursor += (timeBeats / timeBeatType) * 4;
     });
   });
 
-  notes.sort((a, b) => a.time - b.time);
-  return { notes, bpm, timeBeats, timeBeatType, title };
+  const clean = notes.filter(n => Number.isFinite(n.time) && n.time >= 0 && Number.isFinite(n.duration) && n.duration > 0);
+  clean.sort((a, b) => a.time - b.time);
+  return { notes: clean, bpm, timeBeats, timeBeatType, title };
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -491,7 +503,14 @@ class Player {
     this.onNotePlay = null; this.onEnd = null;
   }
 
-  async init() { await Tone.start(); this._buildSynth(); }
+  async init() {
+    // Tone.start() は user gesture が失効していると永久に解決しないため、
+    // 3秒で打ち切って UI を固めない（音は次回の ▶ タップで有効になる）
+    if (Tone.getContext().state !== 'running') {
+      await Promise.race([Tone.start().catch(() => {}), new Promise(r => setTimeout(r, 3000))]);
+    }
+    this._buildSynth();
+  }
 
   _buildSynth() {
     if (this.synth) this.synth.dispose();
@@ -582,11 +601,30 @@ class Camera {
    OMR — Gemini Vision API (無料、バックエンド不要)
    APIキー取得: https://aistudio.google.com/app/apikey
 ═══════════════════════════════════════════════════════ */
-async function recognizeScore(dataUrl) {
-  const apiKey = localStorage.getItem('gemini_api_key') || '';
-  const model  = localStorage.getItem('gemini_model')   || 'gemini-2.0-flash';
-  if (!apiKey) { openSettings(); throw new Error('Gemini APIキーを設定してください（⚙ボタン）'); }
+// 送信サイズを抑える。1920x1080/q0.92 は base64 で約1MBになり、
+// モバイル回線では送信だけで数十秒かかる。
+async function shrinkImage(dataUrl, maxSide = 1400, quality = 0.8) {
+  const img = await new Promise((res, rej) => {
+    const i = new Image();
+    i.onload  = () => res(i);
+    i.onerror = () => rej(new Error('画像の読み込みに失敗しました'));
+    i.src = dataUrl;
+  });
+  const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+  const c = document.createElement('canvas');
+  c.width  = Math.max(1, Math.round(img.width  * scale));
+  c.height = Math.max(1, Math.round(img.height * scale));
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', quality);
+}
 
+async function recognizeScore(rawDataUrl) {
+  const apiKey = localStorage.getItem('gemini_api_key') || '';
+  const model  = (localStorage.getItem('gemini_model') || '').trim() || 'gemini-2.0-flash';
+  if (!apiKey) { openSettings(); throw new Error('Gemini APIキーを設定してください（⚙ボタン）'); }
+  if (!rawDataUrl) throw new Error('画像がありません。撮り直してください');
+
+  const dataUrl  = await shrinkImage(rawDataUrl);
   const base64   = dataUrl.split(',')[1];
   const mimeType = dataUrl.split(';')[0].slice(5);
 
@@ -611,7 +649,7 @@ async function recognizeScore(dataUrl) {
   let res;
   try {
     res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
       {
         signal: controller.signal,
         method: 'POST',
@@ -809,8 +847,20 @@ $('file-input').onchange = e => {
   $('file-input').value = '';
 };
 
+// タップ中にのみ AudioContext を起動できる。失効後は Tone.start() が解決しないため
+// 必ず gesture ハンドラの先頭で呼ぶ。
+async function unlockAudio() {
+  try {
+    if (Tone.getContext().state !== 'running') {
+      await Promise.race([Tone.start(), new Promise(r => setTimeout(r, 1500))]);
+    }
+  } catch {}
+}
+
 $('btn-demo').onclick = async () => {
-  hideError(); showScreen('processing'); $('processing-msg').textContent = 'デモ楽譜を読み込み中…';
+  hideError();
+  await unlockAudio();
+  showScreen('processing'); $('processing-msg').textContent = 'デモ楽譜を読み込み中…';
   try { await loadScore(await recognizeScoreDemo(), 'デモ（キラキラ星）'); }
   catch(e) { showError('デモ読み込みエラー: ' + e.message); showScreen('home'); }
 };
@@ -818,28 +868,40 @@ $('btn-demo').onclick = async () => {
 /* Preview */
 $('btn-retake').onclick = async () => { showScreen('home'); await startCamera(); };
 $('btn-recognize').onclick = async () => {
-  hideError(); showScreen('processing');
+  hideError();
+
+  // タップが有効なうちに AudioContext を解錠する。
+  // fetch 完了後は user gesture が失効しており Tone.start() が解決しなくなる。
+  await unlockAudio();
+
+  showScreen('processing');
 
   // 経過秒数を表示（フリーズしているのか通信中なのかを判別できるように）
   let elapsed = 0;
   $('processing-msg').textContent = '楽譜を認識中… 0秒';
   const tick = setInterval(() => {
-    elapsed++;
-    $('processing-msg').textContent = `楽譜を認識中… ${elapsed}秒`;
+    $('processing-msg').textContent = `楽譜を認識中… ${++elapsed}秒`;
   }, 1000);
 
-  // AbortController が効かない環境でも必ず UI を解放するハードタイムアウト
-  const hardTimeout = new Promise((_, rej) =>
-    setTimeout(() => rej(new Error('応答がありません（70秒）。通信環境を変えて再試行してください')), 70000)
-  );
+  // 認識・読み込みのどこで固まっても必ず UI を解放するハードタイムアウト
+  let hardTimer;
+  const hardTimeout = new Promise((_, rej) => {
+    hardTimer = setTimeout(() => rej(new Error('応答がありません（90秒）。通信環境を変えて再試行してください')), 90000);
+  });
 
   try {
-    const xml = await Promise.race([recognizeScore(captured), hardTimeout]);
-    await loadScore(xml, '認識された楽譜');
+    await Promise.race([
+      (async () => {
+        const xml = await recognizeScore(captured);
+        await loadScore(xml, '認識された楽譜');
+      })(),
+      hardTimeout
+    ]);
   } catch(e) {
     showError('認識エラー: ' + e.message); showScreen('preview');
   } finally {
     clearInterval(tick);
+    clearTimeout(hardTimer);
   }
 };
 
@@ -913,7 +975,7 @@ $('tempo-slider').oninput = () => {
   const b = parseInt($('tempo-slider').value);
   $('tempo-display').textContent = b;
   player.setTempo(b);
-  $('btn-play-pause').textContent = '▶';
+  $('btn-play-pause').textContent = player.isPlaying() ? '⏸' : '▶';
 };
 $('volume-slider').oninput  = () => player.setVolume(parseInt($('volume-slider').value));
 $('instrument-select').onchange = () => player.setInstrument($('instrument-select').value);
@@ -922,7 +984,7 @@ $('instrument-select').onchange = () => player.setInstrument($('instrument-selec
 function openSettings() {
   $('gemini-key-input').value = localStorage.getItem('gemini_api_key') || '';
   $('gemini-model-select').value   = localStorage.getItem('gemini_model')   || 'gemini-2.0-flash';
-  $('gemini-measures').value       = localStorage.getItem('gemini_measures') || '8';
+  $('gemini-measures').value       = localStorage.getItem('gemini_measures') || '4';
   $('settings-overlay').hidden = false;
 }
 $('btn-list-models').onclick = async () => {
@@ -936,9 +998,19 @@ $('btn-list-models').onclick = async () => {
     const names = (j.models || [])
       .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
       .map(m => m.name.replace('models/', ''));
-    $('model-list').innerHTML = names.length
-      ? '✅ 使用可能:<br>' + names.map(n => `<span style="cursor:pointer;color:var(--accent)" onclick="$('gemini-model-select').value='${n}'">${n}</span>`).join('<br>')
-      : '対応モデルなし';
+    const box = $('model-list');
+    box.textContent = '';
+    if (!names.length) { box.textContent = '対応モデルなし'; return; }
+    const head = document.createElement('div');
+    head.textContent = '✅ 使用可能（タップで選択）:';
+    box.appendChild(head);
+    names.forEach(n => {
+      const row = document.createElement('div');
+      row.textContent = n;
+      row.style.cssText = 'cursor:pointer;color:var(--accent)';
+      row.onclick = () => { $('gemini-model-select').value = n; };
+      box.appendChild(row);
+    });
   } catch(e) { $('model-list').textContent = 'エラー: ' + e.message; }
 };
 
@@ -946,7 +1018,7 @@ $('btn-settings').onclick = openSettings;
 $('btn-settings-cancel').onclick = () => { $('settings-overlay').hidden = true; };
 $('btn-settings-save').onclick = () => {
   const key   = $('gemini-key-input').value.trim();
-  const model = $('gemini-model-select').value;
+  const model = $('gemini-model-select').value.trim() || 'gemini-2.0-flash';
   if (key) localStorage.setItem('gemini_api_key', key);
   else     localStorage.removeItem('gemini_api_key');
   localStorage.setItem('gemini_model',   model);
